@@ -7,12 +7,16 @@ whips through hairpin turns. Slip through holes, dodge pillars, blades, lasers a
 crushers - up, down, left, right. Shave obstacles close for near-miss combos.
 
 Move the mouse (or WASD / arrows / gamepad stick).  SPACE start / retry, ESC pause.
+Right stick: up/down = speed along the tunnel (Z), left/right = look / bank.
 """
 import json
 import math
 import os
 import random
+import re
 import sys
+import threading
+import time
 
 import numpy as np
 import pygame
@@ -32,6 +36,13 @@ CONFIG = {
     "speed_blur": True,            # zoom-ghost at high speed
     "draw_distance": 320,          # world units
     "sound": True,
+    "volume": 0.8,                 # master volume 0..1 for sound effects
+    "music_volume": 0.32,          # background music (0 = off; M key / L-click x2 toggles it)
+    "engine_volume": 1.0,          # engine / wind roar that follows your speed
+    # per-sound volume (0 = mute that one). Names: pick gold near hit die stage start tick pause
+    # resume back recenter mute focus_on focus_off camera dash ready deny boost brake pad.
+    # Your own sounds: drop  sounds/<name>.wav (or .ogg)  next to the game; sounds/music.ogg replaces the music.
+    "sound_volumes": {},
     # --- two-stick pad (no d-pad / face buttons; each stick has a click).
     #     Run `python cursor_dash.py --joytest` (or gamepad_test.bat), wiggle each stick and
     #     click it, and copy the axis / button numbers it prints into the numbers below.
@@ -44,14 +55,29 @@ CONFIG = {
         "deadzone": 0.15,
         "sensitivity": 2.6,                # how fast a full stick push sweeps the cursor
         "use_hat": True,                   # a hat / d-pad, if the device has one
-        "btn_recenter": 0,                 # LEFT stick click : snap the cursor to the middle
-        "btn_pause": 1,                    # RIGHT stick click: pause / resume
-        "btn_back": 0,                     # while paused, this one quits to the title
-        # in the title and crash screens ANY stick click starts / retries
+        "btn_left": 0,                     # LEFT stick click button number
+        "btn_right": 1,                    # RIGHT stick click button number
     },
-    # --- Arduino over a serial cable (Uno / Nano / ESP32 ... anything without native USB gamepad).
-    #     Set a port here ("COM5") or start with:  python cursor_dash.py --serial COM5
-    "serial": {"port": None, "baud": 115200},
+    # Each stick click does three things: quick tap, double tap, hold (USB pad AND Arduino).
+    # Actions: recenter, mute, precision, pause, camera, dash
+    "clicks": {0: {"tap": "recenter", "double": "mute", "hold": "precision"},   # left click
+               1: {"tap": "pause", "double": "camera", "hold": "dash"}},        # right click
+    "hold_time": 0.35,                     # seconds before a press counts as "hold"
+    "double_time": 0.28,                   # max gap between the two taps of a double tap
+    "boost": 0.35,                         # right stick up: up to +35% speed, down: up to -35%
+    "dash_cooldown": 5.0,                  # seconds between dashes (dash = short invulnerability)
+    # --- Arduino UNO over USB serial (Windows sees it as a COM port, not a gamepad).
+    #     Flash arduino/cursor_dash_serial (or vault_runner's vault_pad sketch): the game finds
+    #     the port and baud rate itself. Lines: lx,ly,rx,ry[,lclick,rclick,...] (any labels ok),
+    #     or a one-stick "x,y,sw" sketch.
+    "arduino": {
+        "enabled": True,
+        "port": "auto",                    # or e.g. "COM19"  (also: --serial COM19)
+        "baud": 115200,                    # other common rates are tried automatically
+        "deadzone": 0.12,
+        "invert_lx": False, "invert_ly": False, "invert_rx": False, "invert_ry": False,
+        "swap_sticks": False,              # True if left/right sticks are wired the other way round
+    },
     "stage_length": 800,           # metres per stage
     "difficulties": {              # speed x, spacing x (bigger = easier), shields, curve x
         "Easy":   dict(speed=0.85, gap=1.25, shields=3, curve=0.7),
@@ -411,10 +437,12 @@ class Sfx:
         if not enabled:
             return
         try:
-            pygame.mixer.init(44100, -16, 1, 512)
-            pygame.mixer.set_num_channels(12)
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(44100, -16, 2, 512)
+            pygame.mixer.set_num_channels(16)
+            sr, _, chans = pygame.mixer.get_init()   # the device may force stereo
+            self.chans = chans
             self.ok = True
-            sr = 44100
             rng = np.random.default_rng(3)
 
             def tone(freqs, dur, vol=0.35, decay=6.0, noise=0.0, sweep=0.0):
@@ -424,7 +452,7 @@ class Sfx:
                 return np.clip((w * vol + noise * rng.standard_normal(len(t))) * env, -1, 1)
 
             def mk(w):
-                return pygame.sndarray.make_sound((np.clip(w, -1, 1) * 32767).astype(np.int16))
+                return self._mk(w)
 
             self.snd["pick"] = mk(tone([1320, 1980], 0.22))
             self.snd["gold"] = mk(np.concatenate([tone([f], 0.12, decay=6) for f in (784, 988, 1319, 1568)]))
@@ -433,6 +461,22 @@ class Sfx:
             self.snd["die"] = mk(tone([70, 40], 1.4, 0.8, 2.6, 0.7, sweep=-0.3))
             self.snd["stage"] = mk(np.concatenate([tone([f, f * 1.5], 0.16, 0.3, 5) for f in (392, 523, 659, 784)]))
             self.snd["start"] = mk(tone([220, 440], 0.6, 0.4, 3, 0.05, sweep=1.5))
+            self.snd["tick"] = mk(tone([1500], 0.04, 0.22, 60))                       # menu / difficulty
+            self.snd["pause"] = mk(tone([440, 330], 0.2, 0.3, 10))
+            self.snd["resume"] = mk(np.concatenate([tone([660], 0.07, decay=12), tone([990], 0.12, decay=8)]))
+            self.snd["back"] = mk(np.concatenate([tone([700], 0.07, decay=12), tone([440], 0.12, decay=8)]))
+            self.snd["recenter"] = mk(tone([900, 1350], 0.1, 0.3, 25))
+            self.snd["mute"] = mk(tone([1000], 0.06, 0.25, 30))
+            self.snd["focus_on"] = mk(tone([500], 0.18, 0.3, 8, sweep=-0.8))
+            self.snd["focus_off"] = mk(tone([300], 0.15, 0.3, 10, sweep=1.5))
+            self.snd["camera"] = mk(np.concatenate([tone([0.1], 0.03, 0, 80, 0.5), tone([0.1], 0.05, 0, 60, 0.4)]))
+            self.snd["dash"] = mk(tone([180], 0.4, 0.45, 5, 0.35, sweep=4))
+            self.snd["ready"] = mk(np.concatenate([tone([f], 0.07, 0.25, 12) for f in (880, 1320)]))
+            self.snd["deny"] = mk(tone([160], 0.25, 0.5, 7))
+            self.snd["boost"] = mk(np.convolve(rng.standard_normal(int(sr * 0.35)), np.ones(30) / 30, "same")
+                                   * 0.9 * np.sin(np.linspace(0, np.pi, int(sr * 0.35))))
+            self.snd["brake"] = mk(tone([140, 95], 0.3, 0.4, 6, 0.25, sweep=-0.6))
+            self.snd["pad"] = mk(np.concatenate([tone([880], 0.08, decay=10), tone([1320], 0.1, decay=10)]))
             # engine: filtered noise + low saw
             n = sr * 2
             t = np.arange(n) / sr
@@ -442,8 +486,31 @@ class Sfx:
             saw = ((t * 46) % 1) * 2 - 1
             self.eng = mk(0.5 * wind * 3.0 + 0.16 * saw + 0.12 * np.sin(2 * np.pi * 92 * t))
             self.music = self._music(sr, rng)
-        except Exception:
+            self._custom_and_volume()
+        except Exception as ex:
+            print("Sound disabled:", ex)
             self.ok = False
+
+    def _custom_and_volume(self):
+        folder = os.path.join(HERE, "sounds")
+        if os.path.isdir(folder):
+            for fn in os.listdir(folder):
+                name, ext = os.path.splitext(fn)
+                if ext.lower() not in (".wav", ".ogg", ".mp3"):
+                    continue
+                try:
+                    snd = pygame.mixer.Sound(os.path.join(folder, fn))
+                except Exception as ex:
+                    print(f"Could not load sounds/{fn}: {ex}")
+                    continue
+                if name == "music":
+                    self.music = snd
+                elif name == "engine":
+                    self.eng = snd
+                else:
+                    self.snd[name] = snd
+        for name, snd in self.snd.items():
+            snd.set_volume(max(0.0, min(1.0, C["volume"] * C["sound_volumes"].get(name, 1.0))))
 
     def _music(self, sr, rng):
         bpm = 132
@@ -480,7 +547,13 @@ class Sfx:
                 tb = np.arange(int(sr * step * 2)) / sr
                 put(t0, np.sin(2 * np.pi * a * tb) * np.exp(-tb * 14) * 0.10)
         out = np.clip(out * 0.9, -1, 1)
-        return pygame.sndarray.make_sound((out * 32767).astype(np.int16))
+        return self._mk(out)
+
+    def _mk(self, w):
+        a = (np.clip(w, -1, 1) * 32767).astype(np.int16)
+        if self.chans > 1:                                  # mono -> every output channel
+            a = np.repeat(a[:, None], self.chans, 1)
+        return pygame.sndarray.make_sound(np.ascontiguousarray(a))
 
     def play(self, name, vol=1.0):
         if self.ok and name in self.snd:
@@ -490,60 +563,149 @@ class Sfx:
 
 
 # =====================================================================
-#  Arduino on a serial port: lines like  J,512,498,530,511,0,1
-#  (left X, left Y, right X, right Y, left click, right click; raw 0-1023 ADC values)
+#  Arduino pad over USB serial (auto port / baud / format, reconnects)
 # =====================================================================
 class SerialPad:
-    def __init__(self, port, baud):
-        import serial          # pip install pyserial
-        import threading
-        self.ser = serial.Serial(port, baud, timeout=0.1)
-        self.raw = None
-        self.center = None
-        self.axes = [0.0] * 4
-        self.buttons = [0, 0]
-        self.prev = [0, 0]
-        self._boot = []
-        self.alive = True
-        threading.Thread(target=self._reader, daemon=True).start()
+    """Reads a microcontroller that prints one line of numbers per reading:
+         lx, ly, rx, ry[, btn0, btn1, ...]
+    Any separator / labels work ("X:512 Y:498 ..."). Axes may be raw ADC (0-1023 / 0-4095)
+    or already -1..1. Sticks and buttons are calibrated from their resting state, so
+    buttons may report 0 or 1 when pressed. Runs in a background thread and reconnects."""
+    NUM = re.compile(r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?")
+    GOOD_VIDS = (0x2341, 0x2A03, 0x1A86, 0x0403, 0x10C4, 0x239A)   # Arduino, CH340, FTDI, CP210x, Adafruit
 
-    def _reader(self):
-        while self.alive:
+    def __init__(self, cfg, start=True):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.status = "searching for Arduino..."
+        self.port = None
+        self.connected = False
+        self.last_line = ""
+        self.vals = None
+        self.calib = []
+        self.center = self.idle = None
+        self.full = 1023.0
+        if start:
             try:
-                line = self.ser.readline().decode("ascii", "ignore").strip()
-            except Exception:
-                self.alive = False
+                import serial  # noqa: F401
+                import serial.tools.list_ports  # noqa: F401
+            except ImportError:
+                self.status = "pyserial not installed (pip install pyserial)"
                 return
-            if self.parse(line):
-                pass
+            threading.Thread(target=self._run, daemon=True).start()
 
-    def parse(self, line):
-        if not line.startswith("J,"):
+    # -- parsing (also used directly by tests) --
+    def feed(self, line):
+        nums = [float(n) for n in self.NUM.findall(line)]
+        if len(nums) < 3:
             return False
-        try:
-            v = [int(x) for x in line[2:].split(",")]
-        except ValueError:
-            return False
-        if len(v) < 6:
-            return False
-        a = v[:4]
-        if self.center is None:                   # calibrate: stick at rest for the first samples
-            self._boot.append(a)
-            if len(self._boot) >= 15:
-                self.center = [float(np.median([b[i] for b in self._boot])) for i in range(4)]
-            return True
-        out = []
-        for i in range(4):
-            c = self.center[i]
-            out.append(clampv((a[i] - c) / max(c, 1023 - c, 1.0), -1.0, 1.0))
-        self.axes = out
-        self.buttons = [1 if v[4] else 0, 1 if v[5] else 0]
+        with self.lock:
+            self.last_line = line.strip()
+            if self.center is None or len(nums) != len(self.center) + len(self.idle):
+                self.calib.append(nums)
+                self.calib = [c for c in self.calib if len(c) == len(nums)][-40:]
+                if len(self.calib) >= 12:
+                    cols = list(zip(*self.calib))
+                    na = 2 if len(nums) == 3 else 4        # "x,y,sw" = one stick
+                    self.center = [sorted(c)[len(c) // 2] for c in cols[:na]]
+                    self.idle = [max(set(c), key=c.count) for c in cols[na:]]
+                    top = max(max(c) for c in cols[:na])
+                    self.full = 1.0 if top <= 1.5 else 4095.0 if top > 1100 else 1023.0
+                    self.calib = []
+                return True
+            self.vals = nums
         return True
 
-    def pressed(self):
-        new = [i for i in range(2) if self.buttons[i] and not self.prev[i]]
-        self.prev = list(self.buttons)
-        return new
+    def recalibrate(self):
+        with self.lock:
+            self.center = self.idle = self.vals = None
+            self.calib = []
+
+    @property
+    def n_axes(self):
+        with self.lock:
+            return len(self.center) if self.center else 4
+
+    @property
+    def ready(self):
+        return self.connected and self.vals is not None
+
+    def axis(self, i):
+        with self.lock:
+            if self.vals is None or not 0 <= i < len(self.center):
+                return 0.0
+            v, c = self.vals[i], self.center[i]
+            lo = -1.0 if self.full == 1.0 else 0.0
+            span = (self.full - c) if v >= c else (c - lo)
+            a = (v - c) / span if span > 1e-6 else 0.0
+        a = max(-1.0, min(1.0, a))
+        dz = self.cfg["deadzone"]
+        return 0.0 if abs(a) < dz else (abs(a) - dz) / (1 - dz) * (1 if a > 0 else -1)
+
+    def button(self, i):
+        with self.lock:
+            if self.vals is None or not 0 <= i < len(self.idle):
+                return False
+            return self.vals[len(self.center) + i] != self.idle[i]
+
+    def num_buttons(self):
+        with self.lock:
+            return len(self.idle) if self.idle else 0
+
+    # -- serial thread --
+    def _candidates(self):
+        from serial.tools import list_ports
+        if self.cfg["port"] != "auto":
+            return [self.cfg["port"]]
+        ports = [p for p in list_ports.comports() if "bluetooth" not in (p.description or "").lower()]
+        good = [p.device for p in ports if p.vid in self.GOOD_VIDS or
+                re.search(r"arduino|ch34|usb.?serial|uno", (p.description or "") + (p.manufacturer or ""), re.I)]
+        return good + [p.device for p in ports if p.device not in good]
+
+    def _run(self):
+        import serial
+        while True:
+            for dev in self._candidates():
+                for baud in dict.fromkeys([self.cfg["baud"], 115200, 9600, 57600, 38400, 19200, 250000]):
+                    try:
+                        s = serial.Serial(dev, baud, timeout=0.2)
+                    except Exception:
+                        break                     # port busy / gone: next port
+                    self.status = f"trying {dev} @ {baud}..."
+                    ok, t0, buf = 0, time.time(), b""
+                    self.recalibrate()
+                    try:
+                        # the UNO resets when the port opens: give it up to ~3 s to talk
+                        while time.time() - t0 < 3.0 and ok < 6:
+                            buf += s.read(256)
+                            *lines, buf = buf.split(b"\n")
+                            for ln in lines:
+                                if self.feed(ln.decode("ascii", "ignore")):
+                                    ok += 1
+                        if ok < 6:
+                            s.close()
+                            continue
+                        self.port, self.connected = dev, True
+                        self.status = f"connected on {dev} @ {baud}"
+                        while True:
+                            buf += s.read(max(1, s.in_waiting))
+                            *lines, buf = buf.split(b"\n")
+                            for ln in lines:
+                                self.feed(ln.decode("ascii", "ignore"))
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+                    if self.connected:
+                        self.connected = False
+                        self.status = f"{dev} disconnected - searching..."
+                        break
+            if not self.connected and self.status.startswith(("trying", "searching")):
+                self.status = "no Arduino found - plug it in (searching...)"
+            time.sleep(1.0)
 
 
 # =====================================================================
@@ -593,15 +755,20 @@ class Game:
         self.show_fps = False
         self.pad = None
         self.ser = None
-        port = C["serial"]["port"]
         if "--serial" in sys.argv:
-            port = sys.argv[sys.argv.index("--serial") + 1]
-        if port:
-            try:
-                self.ser = SerialPad(port, C["serial"]["baud"])
-                print(f"Arduino serial pad on {port}: keep both sticks centred for a second (auto-calibrates).")
-            except Exception as ex:
-                print(f"Could not open serial port {port}: {ex}")
+            C["arduino"]["port"] = sys.argv[sys.argv.index("--serial") + 1]
+        if C["arduino"]["enabled"]:
+            self.ser = SerialPad(C["arduino"])
+        self.ser_seen = False
+        self.clicks = {}           # click -> [pressed_at, taps, released_at]
+        self.holding = {}          # click -> hold action currently active
+        self.click_prev = [False, False]
+        self.combo_armed = True
+        self.cam_mode = 0          # 0 chase cam, 1 close cam
+        self.look = 0.0            # right stick X, eased
+        self.throttle = 0.0        # right stick Y, eased (-1 brake .. +1 boost)
+        self.thr_state = 0
+        self.dash_cd = 0.0
         pygame.joystick.init()
         if pygame.joystick.get_count():
             self._open_pad(0)
@@ -626,15 +793,165 @@ class Game:
         except pygame.error:
             self.pad = None
 
+    def stick(self, name):
+        """lx / ly / rx / ry in -1..1 (right = +, down = +). USB pad and Arduino combined."""
+        g, ar = C["gamepad"], C["arduino"]
+        v = self.axis(g[{"lx": "axis_x", "ly": "axis_y", "rx": "axis_x2", "ry": "axis_y2"}[name]])
+        sp = self.ser
+        if sp and sp.ready:
+            if sp.n_axes == 2:                   # one-stick sketch: it is the left stick
+                a = sp.axis({"lx": 0, "ly": 1}[name]) if name in ("lx", "ly") else 0.0
+            else:
+                n = name
+                if ar["swap_sticks"]:
+                    n = {"l": "r", "r": "l"}[n[0]] + n[1]
+                a = sp.axis({"lx": 0, "ly": 1, "rx": 2, "ry": 3}[n])
+            a *= -1 if ar["invert_" + name] else 1
+            if abs(a) > abs(v):
+                v = a
+        return v
+
+    def button(self, n):
+        try:
+            return bool(self.pad and 0 <= n < self.pad.get_numbuttons() and self.pad.get_button(n))
+        except pygame.error:
+            return False
+
+    def click_states(self):
+        """[left click, right click] from the USB pad and/or the Arduino."""
+        g = C["gamepad"]
+        cur = [self.button(g["btn_left"]), self.button(g["btn_right"])]
+        sp = self.ser
+        if sp and sp.ready:
+            nb = sp.num_buttons()
+            if sp.n_axes == 2:                   # one-stick: its click acts as the RIGHT click
+                cur[1] = cur[1] or (nb > 0 and sp.button(0))
+            else:
+                cur[0] = cur[0] or (nb > 0 and sp.button(0))
+                cur[1] = cur[1] or (nb > 1 and sp.button(1))
+        return cur
+
+    def held(self, action):
+        return action in self.holding.values()
+
+    def poll_pad(self):
+        sp = self.ser
+        if sp and sp.ready and not self.ser_seen:
+            self.ser_seen = True
+            self.sfx.play("pad")
+            self.popup(f"ARDUINO PAD {sp.status.upper()}", (150, 220, 255), "sm")
+        elif sp and self.ser_seen and not sp.ready:
+            self.ser_seen = False
+            self.popup("ARDUINO PAD DISCONNECTED", (255, 120, 90), "sm")
+        cur = self.click_states()
+        prev, self.click_prev = self.click_prev, cur
+        now = time.time()
+        if cur[0] and cur[1]:                    # both clicks together
+            if self.combo_armed:
+                self.combo_armed = False
+                self.clicks.clear()
+                self.release_holds()
+                self.on_action("both")
+            return
+        if not self.combo_armed:
+            if not any(cur):
+                self.combo_armed = True
+            return
+        for i in (0, 1):
+            self._click(i, C["clicks"][i], cur[i], prev[i], now)
+
+    def release_holds(self):
+        for act in self.holding.values():
+            self.on_action(act + "_end")
+        self.holding.clear()
+
+    def _click(self, i, g, down, was, now):
+        """Stick click gestures: tap / double tap / hold, each its own action."""
+        st = self.clicks.get(i)
+        if down and not was:
+            if st and st[2] and now - st[2] < C["double_time"]:
+                st[0], st[1] = now, st[1] + 1
+            else:
+                self.clicks[i] = [now, 1, 0.0]
+        elif down and st and i not in self.holding and st[1] == 1 and now - st[0] >= C["hold_time"]:
+            self.holding[i] = g["hold"]
+            self.on_action(g["hold"])
+        elif not down and was and st:
+            act = self.holding.pop(i, None)
+            if act:
+                self.clicks.pop(i, None)
+                self.on_action(act + "_end")
+            elif st[1] >= 2:
+                self.clicks.pop(i, None)
+                self.on_action(g["double"])
+            else:
+                st[2] = now
+        elif not down and st and st[2] and now - st[2] >= C["double_time"]:
+            self.clicks.pop(i, None)
+            self.on_action(g["tap"], i)
+
+    def on_action(self, act, click=None):
+        """A stick-click gesture happened: do what it means on the current screen."""
+        st = self.state
+        if st in ("title", "dead"):
+            if act in ("pause", "recenter", "both", "dash"):
+                self.confirm()
+            elif act in ("camera", "mute"):
+                self.change_diff(1 if act == "camera" else -1)
+            return
+        if st == "pause":
+            if act in ("pause", "both"):
+                self.toggle_pause()
+            elif act == "recenter":
+                self.to_title()
+            elif act == "mute":
+                self.toggle_music()
+            return
+        if act in ("pause", "both"):
+            self.toggle_pause()
+        elif act == "recenter":
+            self.ctl = [0.0, 0.0]
+            self.sfx.play("recenter")
+        elif act == "mute":
+            self.toggle_music()
+        elif act == "camera":
+            self.cam_mode ^= 1
+            self.sfx.play("camera")
+            self.popup("CLOSE CAM" if self.cam_mode else "CHASE CAM", (200, 220, 255), "sm")
+        elif act == "dash":
+            self.dash()
+        elif act == "precision":
+            self.sfx.play("focus_on")
+        elif act == "precision_end":
+            self.sfx.play("focus_off")
+
+    def change_diff(self, d):
+        self.diff_i = (self.diff_i + d) % len(self.diff_names)
+        self.sfx.play("tick")
+
+    def toggle_music(self):
+        self.sfx.play("mute")
+        if self.sfx.ok:
+            v = self.sfx.music.get_volume()
+            self.sfx.music.set_volume(0.0 if v > 0 else C["music_volume"] or 0.32)
+            self.popup("MUSIC OFF" if v > 0 else "MUSIC ON", (200, 220, 255), "sm")
+
+    def dash(self):
+        if self.state != "play" or self.demo:
+            return
+        if self.dash_cd > 0:
+            self.sfx.play("deny")
+            return
+        P = self.P
+        P.inv = max(P.inv, 0.7)
+        P.speed += 14
+        self.dash_cd = C["dash_cooldown"]
+        self.flash = max(self.flash, 0.35)
+        self.sfx.play("dash")
+        self.popup("DASH!", (140, 240, 255))
+
     def axis(self, n):
         g = C["gamepad"]
-        if self.ser:
-            if 0 <= n < 4:
-                v = self.ser.axes[n]
-                if abs(v) < g["deadzone"]:
-                    return 0.0
-                return (abs(v) - g["deadzone"]) / (1 - g["deadzone"]) * (1 if v > 0 else -1)
-            return 0.0
         try:
             if self.pad and 0 <= n < self.pad.get_numaxes():
                 v = self.pad.get_axis(n)
@@ -715,6 +1032,8 @@ class Game:
         return base * self.diff["speed"]
 
     def start_game(self):
+        self.dash_cd = 0.0
+        self.throttle = self.look = 0.0
         self.reset(demo=False)
         self.state = "play"
         pygame.mouse.set_visible(False)
@@ -724,7 +1043,7 @@ class Game:
     def start_music(self):
         if self.sfx.ok and not self.music_on:
             self.sfx.music.play(-1)
-            self.sfx.music.set_volume(0.32)
+            self.sfx.music.set_volume(C["music_volume"])
             self.sfx.eng.play(-1)
             self.sfx.eng.set_volume(0.0)
             self.music_on = True
@@ -748,21 +1067,7 @@ class Game:
         if e.type == pygame.JOYDEVICEREMOVED:
             self.pad = None
         if e.type == pygame.JOYHATMOTION and self.state == "title" and e.value[0]:
-            self.diff_i = (self.diff_i + e.value[0]) % len(self.diff_names)
-        if e.type == pygame.JOYBUTTONDOWN:
-            g = C["gamepad"]
-            if self.state in ("title", "dead"):
-                self.confirm()
-            elif self.state == "play":
-                if e.button == g["btn_pause"]:
-                    self.toggle_pause()
-                else:
-                    self.ctl = [0.0, 0.0]
-            elif self.state == "pause":
-                if e.button == g["btn_pause"]:
-                    self.toggle_pause()
-                elif e.button == g["btn_back"]:
-                    self.to_title()
+            self.change_diff(e.value[0])
         if e.type == pygame.WINDOWFOCUSLOST and self.state == "play":
             self.toggle_pause()
         if e.type != pygame.KEYDOWN:
@@ -774,26 +1079,35 @@ class Game:
             self.show_fps = not self.show_fps
         elif k == pygame.K_F12:
             pygame.image.save(self.screen, os.path.join(HERE, f"shot_{pygame.time.get_ticks()}.png"))
-        elif k == pygame.K_m and self.sfx.ok:
-            v = self.sfx.music.get_volume()
-            self.sfx.music.set_volume(0.0 if v > 0 else 0.32)
+        elif k == pygame.K_m:
+            self.toggle_music()
         elif self.state == "title":
             if k in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_KP_ENTER):
                 self.confirm()
             elif k in (pygame.K_LEFT, pygame.K_a, pygame.K_KP4):
-                self.diff_i = (self.diff_i - 1) % len(self.diff_names)
+                self.change_diff(-1)
             elif k in (pygame.K_RIGHT, pygame.K_d, pygame.K_KP6):
-                self.diff_i = (self.diff_i + 1) % len(self.diff_names)
+                self.change_diff(1)
             elif k == pygame.K_ESCAPE:
                 self.quit()
         elif self.state == "play":
             if k in (pygame.K_ESCAPE, pygame.K_p):
                 self.toggle_pause()
+            elif k in (pygame.K_SPACE, pygame.K_TAB):
+                self.dash()
+            elif k == pygame.K_v:
+                self.on_action("camera")
+            elif k in (pygame.K_c, pygame.K_KP0):
+                self.sfx.play("recenter")
+            elif k in (pygame.K_LSHIFT, pygame.K_RSHIFT):
+                self.sfx.play("focus_on")
         elif self.state == "pause":
             if k in (pygame.K_ESCAPE, pygame.K_p, pygame.K_SPACE):
                 self.toggle_pause()
             elif k == pygame.K_q:
                 self.to_title()
+            elif k == pygame.K_v:
+                self.toggle_music()
         elif self.state == "dead":
             if k in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_r):
                 self.confirm()
@@ -804,6 +1118,8 @@ class Game:
         self.start_game()
 
     def to_title(self):
+        self.sfx.play("back")
+        self.release_holds()
         self.reset(demo=True)
         self.state = "title"
         pygame.mouse.set_visible(True)
@@ -811,9 +1127,11 @@ class Game:
     def toggle_pause(self):
         if self.state == "play":
             self.state = "pause"
+            self.sfx.play("pause")
             pygame.mouse.set_visible(True)
         elif self.state == "pause":
             self.state = "play"
+            self.sfx.play("resume")
             pygame.mouse.set_visible(False)
 
     def quit(self):
@@ -859,19 +1177,30 @@ class Game:
             self.ctl = [0.0, 0.0]
         sens = 2.4
         g = C["gamepad"]
+        # Z axis (speed along the tunnel) and look: right stick, or R/F and Q/E keys
+        thr = float(keys[pygame.K_r] or keys[pygame.K_PAGEUP]) - float(keys[pygame.K_f] or keys[pygame.K_PAGEDOWN])
+        lk = float(keys[pygame.K_e]) - float(keys[pygame.K_q])
         if self.pad or self.ser:
             if g["split_sticks"]:
-                ax, ay = self.axis(g["axis_x"]), self.axis(g["axis_x2"])
+                ax, ay = self.stick("lx"), self.stick("rx")
             else:
-                ax, ay = self.axis(g["axis_x"]), self.axis(g["axis_y"])
-                if g["axis_x2"] >= 0:
-                    ax2, ay2 = self.axis(g["axis_x2"]), self.axis(g["axis_y2"])
-                    ax, ay = (ax if abs(ax) >= abs(ax2) else ax2), (ay if abs(ay) >= abs(ay2) else ay2)
+                ax, ay = self.stick("lx"), self.stick("ly")
+                thr -= self.stick("ry")
+                lk += self.stick("rx")
             ax *= -1 if g["invert_x"] else 1
             ay *= 1 if g["invert_y"] else -1
             hx, hy = self.hat()
             dx += ax * g["sensitivity"] / sens + hx
             dy += ay * g["sensitivity"] / sens + hy
+        thr, lk = clampv(thr, -1, 1), clampv(lk, -1, 1)
+        self.throttle += (thr - self.throttle) * min(1.0, dt * 6)
+        self.look += (lk - self.look) * min(1.0, dt * 6)
+        ts = 1 if thr > 0.5 else -1 if thr < -0.5 else 0
+        if ts and ts != self.thr_state:
+            self.sfx.play("boost" if ts > 0 else "brake", 0.8)
+        self.thr_state = ts
+        if self.held("precision") or keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]:
+            dx, dy = dx * 0.4, dy * 0.4
         if dx or dy:
             self.mouse_active = False
             self.ctl[0] = clampv(self.ctl[0] + dx * dt * sens, -1, 1)
@@ -883,15 +1212,16 @@ class Game:
         self.popups = [p for p in self.popups if p[1] > 0]
         self.shake = max(0.0, self.shake - dt * 2.2)
         self.flash = max(0.0, self.flash - dt * 2.0)
-        if self.ser:
-            for b in self.ser.pressed():
-                self.handle(pygame.event.Event(pygame.JOYBUTTONDOWN, button=b))
+        self.poll_pad()
+        if self.dash_cd > 0:
+            self.dash_cd -= dt
+            if self.dash_cd <= 0 and self.state == "play":
+                self.sfx.play("ready", 0.7)
         if self.state == "title" and (self.pad or self.ser):    # flick a stick to change difficulty
-            g = C["gamepad"]
-            fx = self.axis(g["axis_x"]) or self.axis(g["axis_x2"])
+            fx = self.stick("lx") or self.stick("rx")
             flick = 1 if fx > 0.6 else -1 if fx < -0.6 else 0
             if flick and flick != getattr(self, "_flick", 0):
-                self.diff_i = (self.diff_i + flick) % len(self.diff_names)
+                self.change_diff(flick)
             self._flick = flick
         if self.state in ("pause",):
             return
@@ -904,7 +1234,7 @@ class Game:
             P.speed *= math.exp(-dt * 2.2)
         else:
             self.read_input(dt)
-            target = 34.0 if self.demo else self.speed_at(P.dist)
+            target = 34.0 if self.demo else self.speed_at(P.dist) * (1 + C["boost"] * self.throttle)
             P.speed += (target - P.speed) * min(1.0, dt * 0.9)
         P.s += P.speed * dt
         if not self.demo:
@@ -976,7 +1306,7 @@ class Game:
             sp[2] -= dt
         self.sparks = [s for s in self.sparks if s[2] > 0]
         if self.sfx.ok and self.music_on:
-            self.sfx.eng.set_volume(0.0 if dead else min(0.5, 0.12 + P.speed / 180))
+            self.sfx.eng.set_volume(0.0 if dead else min(0.5, 0.12 + P.speed / 180) * C["engine_volume"])
 
     def collide(self, dt):
         P = self.P
@@ -1057,8 +1387,12 @@ class Game:
         tr, P = self.track, self.P
         pa, ra, ua, ta = tr.frame(P.s - 8.5)
         pb, rb, ub, tb = tr.frame(P.s + 26)
-        want = pa + ra * (P.x * 0.42) + ua * (P.y * 0.42 + 1.9)
-        look = pb + rb * (P.x * 0.55) + ub * (P.y * 0.55)
+        if self.cam_mode:                      # close cam
+            pa, ra, ua, ta = tr.frame(P.s - 4.0)
+            want = pa + ra * (P.x * 0.7) + ua * (P.y * 0.7 + 0.9)
+        else:
+            want = pa + ra * (P.x * 0.42) + ua * (P.y * 0.42 + 1.9)
+        look = pb + rb * (P.x * 0.55 + self.look * 9.0) + ub * (P.y * 0.55)
         up = ua
         k = 1.0 if snap or self.cam_pos is None else 1 - math.exp(-dt * 10)
         if self.cam_pos is None:
@@ -1072,7 +1406,7 @@ class Game:
         f = norm(self.cam_look - pos)
         r = norm(np.cross(f, self.cam_up))
         u = np.cross(r, f)
-        roll = -P.vx * 0.004 + (np.random.randn() * 0.02 * self.shake if self.shake else 0)
+        roll = -P.vx * 0.004 - self.look * 0.35 + (np.random.randn() * 0.02 * self.shake if self.shake else 0)
         self.cam_roll += (roll - self.cam_roll) * min(1, dt * 6)
         c, s = math.cos(self.cam_roll), math.sin(self.cam_roll)
         self.cr, self.cu = r * c + u * s, u * c - r * s
@@ -1459,6 +1793,13 @@ class Game:
             pygame.draw.polygon(self.screen, col, [(38 + i * 34, sh - 64), (54 + i * 34, sh - 54),
                                                    (54 + i * 34, sh - 38), (38 + i * 34, sh - 24),
                                                    (22 + i * 34, sh - 38), (22 + i * 34, sh - 54)])
+        dash = "DASH READY" if self.dash_cd <= 0 else f"DASH {self.dash_cd:.1f}s"
+        self.text(dash, self.f_sm, neon if self.dash_cd <= 0 else (120, 125, 140), (28, 88))
+        if abs(self.throttle) > 0.15:
+            self.text("BOOST" if self.throttle > 0 else "BRAKE", self.f_sm,
+                      (255, 200, 90) if self.throttle > 0 else (150, 200, 255), (28, 114))
+        if self.held("precision") or pygame.key.get_pressed()[pygame.K_LSHIFT]:
+            self.text("PRECISION", self.f_sm, (255, 255, 160), (sw // 2, sh - 40), "midtop")
         if P.combo > 1:
             self.text(f"COMBO x{P.combo}", self.f_med, (255, 255, 140), (sw - 28, sh - 60), "topright")
         y = sh // 2 + 60
@@ -1481,15 +1822,20 @@ class Game:
             self.text(f"<   {d.upper()}   >", self.f_med, (255, 255, 255), (sw // 2, sh * 0.58), "midtop")
             self.text("SPACE / click / stick click - start      LEFT / RIGHT / flick stick - difficulty      ESC - quit",
                       self.f_sm, (200, 210, 230), (sw // 2, sh * 0.58 + 56), "midtop")
-            self.text("mouse, WASD / arrows / keypad 8462, or either gamepad stick   (C / left click = recenter)", self.f_sm, (170, 180, 200),
+            self.text("mouse / WASD move   R/F speed   Q/E look   SPACE dash   SHIFT precision   V camera   C recenter", self.f_sm, (170, 180, 200),
                       (sw // 2, sh * 0.58 + 86), "midtop")
             self.text(f"Best: {self.hi:,}", self.f_sm, (255, 230, 140), (sw // 2, sh * 0.58 + 122), "midtop")
+            self.text("PAD  L-stick move   R-stick up/down speed, left/right look   "
+                      "L-click tap recenter / 2x mute / hold precision   R-click tap pause / 2x camera / hold DASH",
+                      self.f_sm, (150, 200, 255), (sw // 2, sh - 64), "midtop")
+            if self.ser:
+                self.text(f"Arduino: {self.ser.status}", self.f_sm, (150, 200, 255), (sw // 2, sh - 34), "midtop")
         elif self.state == "play" or self.state == "pause":
             self.draw_hud()
             if self.state == "pause":
                 self.overlay(150)
                 self.text("PAUSED", self.f_big, (255, 255, 255), (sw // 2, sh // 3), "midtop")
-                self.text("ESC / SPACE resume      Q quit to title", self.f_sm, (220, 220, 230),
+                self.text("ESC / SPACE / R-click resume      Q / L-click quit to title      V / L-click x2 music", self.f_sm, (220, 220, 230),
                           (sw // 2, sh // 3 + 100), "midtop")
         elif self.state == "dead":
             self.draw_hud()
@@ -1533,27 +1879,41 @@ class Game:
 
 
 def joytest():
-    """Print live axis / button / hat numbers so you can fill in CONFIG['gamepad']."""
+    """Print live stick / click values (USB gamepads AND the Arduino serial pad)."""
     pygame.init()
     pygame.joystick.init()
     pads = [pygame.joystick.Joystick(i) for i in range(pygame.joystick.get_count())]
+    for p in pads:
+        print(f"USB pad: {p.get_name()}  axes={p.get_numaxes()} buttons={p.get_numbuttons()} hats={p.get_numhats()}")
     if not pads:
-        print("No gamepad found. Plug it in and try again.")
-        return
-    p = pads[0]
-    print(f"Pad: {p.get_name()}  axes={p.get_numaxes()} buttons={p.get_numbuttons()} hats={p.get_numhats()}")
-    print("Move sticks / press buttons. Ctrl+C to quit.")
-    clock, last = pygame.time.Clock(), None
+        print("No USB gamepad (normal for an Arduino UNO - it talks over a COM port instead).")
+    sp = SerialPad(C["arduino"]) if C["arduino"]["enabled"] else None
+    print("Leave the sticks centred for 2 seconds while the Arduino is found. Ctrl+C to quit.\n")
+    clock, last, last_status = pygame.time.Clock(), None, None
     try:
         while True:
             pygame.event.pump()
-            cur = ([round(p.get_axis(i), 2) for i in range(p.get_numaxes())],
-                   [i for i in range(p.get_numbuttons()) if p.get_button(i)],
-                   [p.get_hat(i) for i in range(p.get_numhats())])
-            if cur != last:
-                print(f"axes {cur[0]}  pressed {cur[1]}  hats {cur[2]}")
-                last = cur
-            clock.tick(30)
+            if sp and sp.status != last_status:
+                print("Arduino:", sp.status)
+                last_status = sp.status
+            cur = []
+            if pads:
+                p = pads[0]
+                cur.append("USB axes %s pressed %s hats %s" % (
+                    [round(p.get_axis(i), 1) for i in range(p.get_numaxes())],
+                    [i for i in range(p.get_numbuttons()) if p.get_button(i)],
+                    [p.get_hat(i) for i in range(p.get_numhats())]))
+            if sp and sp.ready:
+                names = ("lx", "ly", "rx", "ry")[:sp.n_axes]
+                cur.append(f"ARDUINO ({sp.n_axes // 2} stick) " +
+                           "  ".join(f"{n}={sp.axis(i):+.1f}" for i, n in enumerate(names)) +
+                           "  clicks %s" % [i for i in range(sp.num_buttons()) if sp.button(i)] +
+                           f"   raw: {sp.last_line}")
+            line = " | ".join(cur)
+            if line and line != last:
+                print(line)
+                last = line
+            clock.tick(20)
     except KeyboardInterrupt:
         pass
 

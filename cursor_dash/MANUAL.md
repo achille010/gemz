@@ -21,14 +21,28 @@ Slow? Lower `render_size` in the `CONFIG` block at the top of `cursor_dash.py`
 
 ## 2. Controls
 
-| | Move | Start / retry | Pause | Recenter |
-|---|---|---|---|---|
-| **Mouse** | move the pointer - the cursor follows it | click | ESC / P | - |
-| **Keyboard** | W A S D or arrows, or keypad 8 4 6 2 | SPACE / ENTER | ESC / P | C or keypad 0 |
-| **Two-stick pad** | either stick (d-pad too, if it has one) | any stick click | right-stick click | left-stick click |
+| Action | Mouse / keyboard | Two-stick pad (USB or Arduino) |
+|---|---|---|
+| Move cursor left/right (X), up/down (Y) | mouse, W A S D / arrows / keypad 8 4 6 2 | **left stick** |
+| Speed along the tunnel (Z): boost / brake | R / F (PgUp / PgDn) | **right stick up / down** |
+| Look left/right + bank | Q / E | **right stick left / right** |
+| Recenter cursor | C / keypad 0 | **left click tap** |
+| Music on/off | M | **left click double tap** |
+| Precision (slow, fine movement) | hold Shift | **hold left click** |
+| Pause / resume | ESC / P | **right click tap** (or both clicks together) |
+| Camera: chase / close | V | **right click double tap** |
+| DASH (0.7 s invulnerable burst, 5 s cooldown) | SPACE / Tab | **hold right click** |
+| Start / retry | SPACE / ENTER / click | any click |
+| Difficulty (title) | LEFT / RIGHT | flick a stick, or click double taps |
+| Quit to title (paused) | Q | left click tap |
 
-Other keys: `LEFT/RIGHT` change difficulty on the title screen (or flick a stick),
-`M` mute music, `F11` fullscreen, `F12` screenshot, `F3` FPS.
+Other keys: `F11` fullscreen, `F12` screenshot, `F3` FPS. Every action has its own sound.
+
+**Sounds** (`CONFIG` at the top of `cursor_dash.py`): `"volume"` (effects, 0-1), `"music_volume"`,
+`"engine_volume"`, and `"sound_volumes"` for single sounds, e.g. `{"near": 0.5, "boost": 0}`.
+Your own sounds: put `sounds/<name>.wav` (or .ogg) in the game folder, e.g. `sounds/dash.wav`;
+`sounds/music.ogg` replaces the music and `sounds/engine.wav` the engine roar. The sound names are
+listed in `CONFIG`.
 
 ## 3. How to play
 
@@ -56,14 +70,8 @@ gauntlets that chain several of them.
 Your controller: two analog sticks, each with left/right (and up/down), and a click. Nothing else.
 The game needs **no** face buttons - the stick clicks do everything:
 
-| Action | Input |
-|---|---|
-| Move the cursor | both sticks (whichever you push harder wins) |
-| Start / retry | click any stick |
-| Recenter cursor | click the LEFT stick |
-| Pause / resume | click the RIGHT stick |
-| Quit to title (while paused) | click the LEFT stick |
-| Difficulty (title screen) | flick a stick left / right |
+See the controls table in section 2. Each click does three things (tap, double tap, hold),
+so the two sticks and their clicks reach every action.
 
 There are **two ways** to connect it. Pick the one that matches your Arduino.
 
@@ -138,19 +146,14 @@ void loop() {
 
 Sketch: `arduino/cursor_dash_serial/cursor_dash_serial.ino`
 
-1. Upload the sketch. Open **Tools -> Serial Monitor** at **115200 baud** - you should see lines
-   like `J,512,498,530,511,0,0` that change when you move the sticks. **Close the Serial Monitor**
-   afterwards (only one program can use the port).
-2. Note the COM port number (Tools -> Port, e.g. `COM5`).
-3. Start the game with the port:
-
-   ```
-   python cursor_dash.py --serial COM5
-   ```
-   or set it permanently in `cursor_dash.py`: `"serial": {"port": "COM5", ...}`, so
-   `play.bat` just works.
-4. **Keep both sticks untouched for the first second** - the game measures their resting position
-   so cheap, off-centre sticks still work.
+1. Upload the sketch (Vault Runner's `vault_pad.ino` works too, and is what's on your UNO now).
+   **Close the Serial Monitor** afterwards: only one program can use the port.
+2. Run `play.bat`. The game **finds the COM port and baud rate itself** (or force one with
+   `--serial COM19` / `"port": "COM19"` in `CONFIG["arduino"]`). The title screen shows
+   `Arduino: connected on COM19`. Close Vault Runner first, because both can't use the port at once.
+3. **Keep both sticks untouched for the first second**: the game measures their resting position.
+4. A stick going the wrong way: set `invert_lx / invert_ly / invert_rx / invert_ry` in
+   `CONFIG["arduino"]`; sticks swapped: `swap_sticks: True`.
 
 ```cpp
 const int PIN_LX = A0, PIN_LY = A1, PIN_RX = A2, PIN_RY = A3;
@@ -177,8 +180,7 @@ void loop() {
 }
 ```
 
-In serial mode the axis numbers are fixed: 0 = left X, 1 = left Y, 2 = right X, 3 = right Y,
-and the buttons are 0 = left click, 1 = right click - matching the default `CONFIG["gamepad"]`.
+Any line format works: `lx,ly,rx,ry,lclick,rclick[,...]`, with or without labels such as `J,`, or a one-stick `x,y,sw`.
 
 ### Find your numbers (Option A, or any other USB pad)
 
@@ -200,7 +202,7 @@ Then edit the `"gamepad"` block near the top of `cursor_dash.py`:
 | `invert_x`, `invert_y` | flip a direction if the cursor goes the wrong way |
 | `deadzone` | ignore tiny stick wobble (raise to 0.25 for a worn / cheap stick) |
 | `sensitivity` | how fast a full push sweeps the cursor |
-| `btn_recenter` | button number of the left click; `btn_pause` right click; `btn_back` |
+| `btn_left`, `btn_right` | button numbers of the left / right stick click |
 | `use_hat` | `False` if the device has a hat that misbehaves |
 
 ### Sticks with only left/right
@@ -217,12 +219,12 @@ horizontal axis of the left stick should be `axis_x` and of the right stick `axi
 
 | Problem | Fix |
 |---|---|
-| Nothing moves | Run `gamepad_test.bat`. If it prints "No gamepad found": Option A - re-plug, check `joy.cpl`; Option B - use `--serial COMx`. |
+| Nothing moves | Run `gamepad_test.bat`. If it prints "No gamepad found": Option A - re-plug, check `joy.cpl`; Option B - check the title screen's `Arduino:` status line. |
 | "Could not open serial port" | Close the Arduino Serial Monitor; check the COM number in Device Manager. |
 | Cursor drifts by itself | Raise `deadzone` (0.25). In serial mode keep the sticks still for the first second. |
 | Left/right or up/down reversed | Toggle `invert_x` / `invert_y`. |
 | Only one stick works | Change `axis_x2/axis_y2` to the numbers `--joytest` printed for the right stick. |
-| Stick clicks do the wrong thing | Swap `btn_recenter` and `btn_pause`. |
+| Stick clicks do the wrong thing | Swap `btn_left` and `btn_right`, or edit `CONFIG["clicks"]`. |
 | Game reads a different device (a real pad) | Unplug it, or use `--serial`, which takes priority. |
 | Stutter / low FPS | Lower `render_size`, set `"bloom": 0`, close other programs. |
 
@@ -232,7 +234,7 @@ horizontal axis of the left stick should be `axis_x` and of the right stick `axi
 
 `render_size`, `fov_degrees`, `bloom`, `vignette`, `speed_blur`, `draw_distance`, `sound`,
 `stage_length`, plus the four difficulty presets (`speed`, `gap`, `shields`, `curve`) and the
-whole `gamepad` / `serial` sections above.
+whole `gamepad` / `arduino` / `clicks` / sound sections above.
 
 ## 6. Vault Runner note
 
