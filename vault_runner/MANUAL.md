@@ -56,15 +56,15 @@ Every action has its own sound.
 | Move | W A S D / ↑ ↓ | 8 fwd · 5/2 back · 4/6 strafe | Left stick (tilt = speed) / D-pad | Left stick |
 | Turn (X) | Mouse, ← → | 7 / 9 | Right stick ↔ | Right stick ↔ |
 | Look up/down (Y) | Mouse, PgUp / PgDn | 3 / ÷ | Right stick ↕ | Right stick ↕ |
-| Level the view | Home | 1 | Back (6) | D9 button |
-| Jump (Z) | Space | | RB (5) / R-stick click | **Right-stick click** (away from door) / D7 |
-| Sneak + crouch (Z) | Ctrl / C | . | X (2) | D6 button |
-| Sprint | Left Shift | 0 | LB (4) / L-stick click | **Left-stick click** (hold) |
-| Open vault door | E | Enter | A (0) | **Right-stick click** (next to door) |
-| Flashlight | F | + | B (1) | D4 button |
-| Minimap | Tab | − | Y (3) | D5 button |
+| Level the view | Home | 1 | Back (6) | **Right click ×2** (double tap) / D9 |
+| Jump (Z) | Space | | RB (5) / R-stick click | **Right click tap** (away from door) / D7 |
+| Sneak + crouch (Z) | Ctrl / C | . | X (2) | **Right click hold** / D6 |
+| Sprint | Left Shift | 0 | LB (4) / L-stick click | **Left click hold** |
+| Open vault door | E | Enter | A (0) | **Right click tap** (next to door) |
+| Flashlight | F | + | B (1) | **Left click tap** / D4 |
+| Minimap | Tab | − | Y (3) | **Left click ×2** (double tap) / D5 |
 | Pause | Esc / P | | Start (7) | **Both stick clicks together** / D8 |
-| Menus | arrows + Enter | 4 6 8 2 + Enter | Left stick / D-pad + A, Start | Left stick + right click |
+| Menus | arrows + Enter | 4 6 8 2 + Enter | Left stick / D-pad + A, Start | Left stick + right click tap |
 | Re-centre Arduino sticks | F9 | | | |
 | Help / Fullscreen / Screenshot | F1 / F11 / F12 | | | |
 
@@ -72,6 +72,11 @@ In menus the buttons do different things too. In the shop: torch = up, map = dow
 In pause: torch/sprint = quit to title, map = help. On the title screen: sprint/torch = change difficulty.
 
 ### Arduino UNO two-stick pad (lab-made)
+
+Each stick click does three different things: a quick **tap**, a **double tap**, and a **hold** (0.35 s).
+Every action is available with just the two stick clicks, and the extra D4–D9 buttons are optional.
+If the UNO runs a **one-stick** sketch (lines like `x,y,sw`), the game still works: push the stick
+to walk forward/back, tilt it sideways to turn. Its click does tap = door/jump, double = torch, hold = sprint.
 
 A stock Arduino UNO is **not** seen by Windows as a gamepad. It's a USB serial (COM) port, so the
 game reads it directly over serial (the `pyserial` package).
@@ -253,4 +258,7 @@ Open `vault_runner.py`, look at `CONFIG` at the top:
 * **Keypad does nothing:** turn Num Lock ON.
 * **Pad not detected:** plug it in before starting, run `gamepad_test.bat` to confirm Windows sees it.
 * **View drifts on its own with the pad:** raise `"deadzone"` (e.g. `0.25`).
-* **No sound:** the game silently runs without audio if no output device is available.
+* **No sound:** the console prints `Sound disabled: <reason>` if audio can't start. Check the Windows output device.
+* **Configure sounds:** in `CONFIG` set `"volume"` (master, 0-1) and `"sound_volumes"` (per sound, 0 = mute that sound,
+  e.g. `"step": 0.3`). To use your own sound, put `sounds/<name>.wav` (or .ogg) in the game folder, e.g.
+  `sounds/coin.wav`, `sounds/jump.wav`, `sounds/alarm.wav`. The sound names are listed in `CONFIG`.

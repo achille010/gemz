@@ -41,6 +41,11 @@ CONFIG = {
     "head_bob": True,
     "head_bob_z": 1.0,           # real up/down eye movement (0 = off, 2 = double). Small by design
     "sound": True,
+    "volume": 0.8,               # master volume 0..1 for every sound effect
+    # per-sound volume (0 = mute that one sound). Names: coin bar gem key caught step spot door
+    # click blip tick confirm back pause start jump land whoosh sneak pant lost shutter win lose
+    # pad buy deny alarm hum.   Your own sound: drop  sounds/<name>.wav  (or .ogg) next to the game.
+    "sound_volumes": {"step": 0.7, "hum": 0.6, "alarm": 0.7},
     # --- controls ---------------------------------------------------
     "mouse_sensitivity": 0.0022,
     "turn_speed": 2.2,           # arrow-key turning, radians / second
@@ -71,9 +76,15 @@ CONFIG = {
         "invert_look_x": False, "invert_look_y": False,
         "swap_sticks": False,          # True if left/right sticks are wired the other way round
         "deadzone": 0.12,
-        # column after the 4 axes -> action. The first two are the stick clicks (D2, D3)
-        "buttons": {0: "sprint", 1: "use_or_jump", 2: "torch", 3: "map", 4: "sneak",
-                    5: "jump", 6: "pause", 7: "center"},
+        # The stick clicks (D2, D3) each do three things: quick tap, double tap, hold.
+        "clicks": {0: {"tap": "torch", "double": "map", "hold": "sprint"},          # left stick click
+                   1: {"tap": "use_or_jump", "double": "center", "hold": "sneak"}},  # right stick click
+        # one-stick sketches (lines like "x,y,sw"): stick walks forward/back and turns
+        "single_click": {"tap": "use_or_jump", "double": "torch", "hold": "sprint"},
+        "hold_time": 0.35,             # seconds before a press counts as "hold"
+        "double_time": 0.28,           # max gap between the two taps of a double tap
+        # optional extra push buttons D4..D9 (column index after the axes) -> action
+        "buttons": {2: "torch", 3: "map", 4: "sneak", 5: "jump", 6: "pause", 7: "center"},
         "both_clicks_pause": True,     # press both stick clicks together = pause
     },
     "pitch_limit": 0.6,               # how far you can look up / down (fraction of screen)
@@ -504,9 +515,11 @@ class Sfx:
         if not enabled:
             return
         try:
-            pygame.mixer.init(44100, -16, 1, 512)
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(44100, -16, 2, 512)
+            pygame.mixer.set_num_channels(16)
+            sr, _, chans = pygame.mixer.get_init()   # the device may force stereo / another rate
             self.ok = True
-            sr = 44100
 
             def tone(freqs, dur, vol=0.35, decay=6, noise=0.0):
                 t = np.arange(int(sr * dur)) / sr
@@ -516,7 +529,10 @@ class Sfx:
                 return np.clip(w, -1, 1)
 
             def mk(w):
-                return pygame.sndarray.make_sound((w * 32767).astype(np.int16))
+                a = (np.clip(w, -1, 1) * 32767).astype(np.int16)
+                if chans > 1:                              # mono -> every output channel
+                    a = np.repeat(a[:, None], chans, 1)
+                return pygame.sndarray.make_sound(np.ascontiguousarray(a))
 
             self.snd["coin"] = mk(tone([1200, 1800], 0.25))
             self.snd["bar"] = mk(tone([660, 990, 1320], 0.4))
@@ -551,8 +567,23 @@ class Sfx:
             self.snd["alarm"] = mk(0.3 * np.sin(2 * np.pi * np.cumsum(800 + 300 * np.sin(2 * np.pi * 2 * t)) / sr))
             self.snd["hum"] = mk(0.10 * (np.sin(2 * np.pi * 55 * np.arange(2 * sr) / sr) +
                                          0.5 * np.sin(2 * np.pi * 110 * np.arange(2 * sr) / sr)))
-        except Exception:
+            self._custom_and_volume()
+        except Exception as ex:
+            print("Sound disabled:", ex)
             self.ok = False
+
+    def _custom_and_volume(self):
+        folder = os.path.join(HERE, "sounds")
+        if os.path.isdir(folder):
+            for fn in os.listdir(folder):
+                name, ext = os.path.splitext(fn)
+                if ext.lower() in (".wav", ".ogg", ".mp3"):
+                    try:
+                        self.snd[name] = pygame.mixer.Sound(os.path.join(folder, fn))
+                    except Exception as ex:
+                        print(f"Could not load sounds/{fn}: {ex}")
+        for name, snd in self.snd.items():
+            snd.set_volume(max(0.0, min(1.0, C["volume"] * C["sound_volumes"].get(name, 1.0))))
 
     def play(self, name, loops=0):
         if self.ok and name in self.snd:
@@ -598,7 +629,7 @@ class SerialPad:
     # -- parsing (also used directly by tests) --
     def feed(self, line):
         nums = [float(n) for n in self.NUM.findall(line)]
-        if len(nums) < 4:
+        if len(nums) < 3:
             return False
         with self.lock:
             self.last_line = line.strip()
@@ -607,9 +638,10 @@ class SerialPad:
                 self.calib = [c for c in self.calib if len(c) == len(nums)][-40:]
                 if len(self.calib) >= 12:
                     cols = list(zip(*self.calib))
-                    self.center = [sorted(c)[len(c) // 2] for c in cols[:4]]
-                    self.idle = [max(set(c), key=c.count) for c in cols[4:]]
-                    top = max(max(c) for c in cols[:4])
+                    na = 2 if len(nums) == 3 else 4        # "x,y,sw" = one stick
+                    self.center = [sorted(c)[len(c) // 2] for c in cols[:na]]
+                    self.idle = [max(set(c), key=c.count) for c in cols[na:]]
+                    top = max(max(c) for c in cols[:na])
                     self.full = 1.0 if top <= 1.5 else 4095.0 if top > 1100 else 1023.0
                     self.calib = []
                 return True
@@ -622,12 +654,17 @@ class SerialPad:
             self.calib = []
 
     @property
+    def n_axes(self):
+        with self.lock:
+            return len(self.center) if self.center else 4
+
+    @property
     def ready(self):
         return self.connected and self.vals is not None
 
     def axis(self, i):
         with self.lock:
-            if self.vals is None or not 0 <= i < 4:
+            if self.vals is None or not 0 <= i < len(self.center):
                 return 0.0
             v, c = self.vals[i], self.center[i]
             lo = -1.0 if self.full == 1.0 else 0.0
@@ -641,7 +678,7 @@ class SerialPad:
         with self.lock:
             if self.vals is None or not 0 <= i < len(self.idle):
                 return False
-            return self.vals[4 + i] != self.idle[i]
+            return self.vals[len(self.center) + i] != self.idle[i]
 
     def num_buttons(self):
         with self.lock:
@@ -756,6 +793,8 @@ class Game:
         self.menu_dir = (0, 0)
         self.spad_prev = []
         self.combo_armed = True
+        self.spad_clicks = {}      # button -> [pressed_at, taps, released_at]
+        self.spad_holding = {}     # button -> hold action currently active
         self.low_tick = 0
         pygame.joystick.init()
         for i in range(pygame.joystick.get_count()):
@@ -795,6 +834,11 @@ class Game:
         """name = move_x / move_y / look_x / look_y. Combines USB gamepad + Arduino, -1..1."""
         gp, ar = C["gamepad"], C["arduino"]
         v = self.axis(gp[name]) * (-1 if gp.get("invert_" + name) else 1)
+        if self.spad and self.spad.ready and self.spad.n_axes == 2:
+            # one stick: push = walk forward/back, sideways = turn
+            a = {"move_y": self.spad.axis(1), "look_x": self.spad.axis(0)}.get(name, 0.0)
+            a *= -1 if ar.get("invert_" + name) else 1
+            return a if abs(a) > abs(v) else v
         if self.spad and self.spad.ready:
             n = name
             if ar["swap_sticks"]:
@@ -810,9 +854,12 @@ class Game:
             if act == action and self.button(b):
                 return True
         if self.spad and self.spad.ready:
-            for b, act in C["arduino"]["buttons"].items():
-                if act == action and self.spad.button(b):
-                    return True
+            if action in self.spad_holding.values():
+                return True
+            if self.spad.n_axes == 4:
+                for b, act in C["arduino"]["buttons"].items():
+                    if act == action and self.spad.button(b):
+                        return True
         return False
 
     def near_door(self):
@@ -859,6 +906,30 @@ class Game:
             p.vz = C["jump_speed"]
             self.sfx.play("jump")
 
+    def _click(self, i, g, down, was, now):
+        """Stick click gestures: tap / double tap / hold, each its own action."""
+        ar = C["arduino"]
+        st = self.spad_clicks.get(i)
+        if down and not was:
+            if st and st[2] and now - st[2] < ar["double_time"]:
+                st[0], st[1] = now, st[1] + 1
+            else:
+                self.spad_clicks[i] = [now, 1, 0.0]
+        elif down and st and i not in self.spad_holding and st[1] == 1 and now - st[0] >= ar["hold_time"]:
+            self.spad_holding[i] = g["hold"]
+            self.on_action(g["hold"])
+        elif not down and was and st:
+            if self.spad_holding.pop(i, None):
+                self.spad_clicks.pop(i, None)
+            elif st[1] >= 2:
+                self.spad_clicks.pop(i, None)
+                self.on_action(g["double"])
+            else:
+                st[2] = now
+        elif not down and st and st[2] and now - st[2] >= ar["double_time"]:
+            self.spad_clicks.pop(i, None)
+            self.on_action(g["tap"])
+
     def poll_serial(self):
         """Turn Arduino button edges into actions; the left stick drives the menus."""
         sp = self.spad
@@ -870,29 +941,29 @@ class Game:
             self.spad_seen = False
             self.say("Arduino pad disconnected", 3)
         if sp and sp.ready:
+            ar = C["arduino"]
             cur = [sp.button(i) for i in range(sp.num_buttons())]
             prev = self.spad_prev if len(self.spad_prev) == len(cur) else [False] * len(cur)
             self.spad_prev = cur
-            binds = C["arduino"]["buttons"]
-            combo = C["arduino"]["both_clicks_pause"] and len(cur) >= 2
-            if combo and cur[0] and cur[1]:
+            clicks = ar["clicks"] if sp.n_axes == 4 else {0: ar["single_click"]}
+            now = time.time()
+            if ar["both_clicks_pause"] and len(clicks) >= 2 and len(cur) >= 2 and cur[0] and cur[1]:
                 if self.combo_armed:
                     self.combo_armed = False
+                    self.spad_clicks.clear()
+                    self.spad_holding.clear()
                     self.on_action("pause")
-            else:
+            elif not self.combo_armed:
                 if not any(cur[:2]):
                     self.combo_armed = True
-                for i, (c, pv) in enumerate(zip(cur, prev)):
-                    act = binds.get(i)
-                    if not act:
-                        continue
-                    if combo and i < 2 and act not in ("sprint", "sneak"):
-                        # tap actions on stick clicks fire on release, so the pause combo never also jumps
-                        fire = pv and not c and self.combo_armed
-                    else:
-                        fire = c and not pv
-                    if fire:
-                        self.on_action(act)
+            else:
+                for i, g in clicks.items():
+                    if i < len(cur):
+                        self._click(i, g, cur[i], prev[i], now)
+                if sp.n_axes == 4:
+                    for i, act in ar["buttons"].items():
+                        if i < len(cur) and cur[i] and not prev[i]:
+                            self.on_action(act)
         # menus: the left stick acts like arrow keys (for pads without a D-pad)
         if self.state != "play":
             x, y = self.stick("move_x"), self.stick("move_y")
@@ -1497,7 +1568,8 @@ class Game:
                  "KEYPAD (NumLock on)  8/5 move  4/6 strafe  7/9 turn  0 sprint  . sneak  + torch  - map  Enter use",
                  "PAD  left stick move / menus, right stick look (left-right AND up-down)",
                  "     A use  B torch  X sneak  Y map  LB sprint  RB jump  Back level view  Start pause",
-                 "ARDUINO  L-click sprint  R-click door/jump  both clicks pause   (F9 re-centre sticks)",
+                 "ARDUINO  L-click: tap torch, 2x map, hold sprint   R-click: tap door/jump, 2x level view, hold sneak",
+                 "         both clicks together = pause      (F9 re-centre sticks)",
                  "SPACE jump  SHIFT sprint  CTRL/C sneak+crouch  F torch  E door  PgUp/PgDn look up/down  HOME level",
                  "TAB minimap small / big / off      ESC or P pause      F11 fullscreen   F12 screenshot",
                  "F1 ... close this help"]
@@ -1602,8 +1674,9 @@ def joytest():
                     [i for i in range(p.get_numbuttons()) if p.get_button(i)],
                     [p.get_hat(i) for i in range(p.get_numhats())]))
             if sp and sp.ready:
-                ax = C["arduino"]["axes"]
-                cur.append("ARDUINO " + "  ".join(f"{n}={sp.axis(ax[n]):+.1f}" for n in names) +
+                ax = C["arduino"]["axes"] if sp.n_axes == 4 else {"move_x": 0, "move_y": 1}
+                cur.append(f"ARDUINO ({sp.n_axes // 2} stick) " +
+                           "  ".join(f"{n}={sp.axis(ax[n]):+.1f}" for n in names if n in ax) +
                            "  buttons %s" % [i for i in range(sp.num_buttons()) if sp.button(i)] +
                            f"   raw: {sp.last_line}")
             line = " | ".join(cur)
