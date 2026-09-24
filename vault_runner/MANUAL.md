@@ -18,7 +18,7 @@ at the black market between levels and go deeper.
 ## 1. Install & run
 
 ```
-pip install pygame-ce numpy      (or: pip install -r requirements.txt)
+pip install pygame-ce numpy pyserial   (or: pip install -r requirements.txt)
 python vault_runner.py           (or double-click play.bat)
 ```
 
@@ -48,33 +48,51 @@ guards' torch beams show you where they are before you see them.
 
 ## 3. Controls
 
-| Action | Keyboard | Numeric keypad (NumLock ON) | Gamepad (two sticks) |
-|---|---|---|---|
-| Move | W A S D / ↑ ↓ | 8 forward · 5 or 2 back · 4 / 6 strafe | Left stick (analog: tilt = speed) or hat |
-| Look / turn | Mouse, or ← → | 7 turn left · 9 turn right | Right stick |
-| Sprint | Left Shift | 0 | Button 4 or left-stick click (10) |
-| Sneak | Left Ctrl / C | . (period) | Button 2 |
-| Flashlight | F | + | Button 1 |
-| Interact / open door | E | Enter | Button 0 |
-| Minimap (small/big/off) | Tab | − | Button 3 |
-| Pause | Esc / P | | Start (button 7) |
-| Menus | ← → ↑ ↓, Enter | 4 6 8 2, Enter | Hat / D-pad, button 0 = confirm, Start = continue |
-| Shop | keys 1–5 to buy, ↑↓ + E, Enter = next level | | Hat ↑↓ + button 0 to buy, Start = next level |
-| Help / Fullscreen / Screenshot | F1 / F11 / F12 | | |
+You can look in all three directions: **X** turn left/right, **Y** look up/down, **Z** jump up / crouch down.
+Every action has its own sound.
 
-All three input methods work at the same time.
+| Action | Keyboard | Numeric keypad (NumLock ON) | USB gamepad | Arduino UNO pad |
+|---|---|---|---|---|
+| Move | W A S D / ↑ ↓ | 8 fwd · 5/2 back · 4/6 strafe | Left stick (tilt = speed) / D-pad | Left stick |
+| Turn (X) | Mouse, ← → | 7 / 9 | Right stick ↔ | Right stick ↔ |
+| Look up/down (Y) | Mouse, PgUp / PgDn | 3 / ÷ | Right stick ↕ | Right stick ↕ |
+| Level the view | Home | 1 | Back (6) | D9 button |
+| Jump (Z) | Space | | RB (5) / R-stick click | **Right-stick click** (away from door) / D7 |
+| Sneak + crouch (Z) | Ctrl / C | . | X (2) | D6 button |
+| Sprint | Left Shift | 0 | LB (4) / L-stick click | **Left-stick click** (hold) |
+| Open vault door | E | Enter | A (0) | **Right-stick click** (next to door) |
+| Flashlight | F | + | B (1) | D4 button |
+| Minimap | Tab | − | Y (3) | D5 button |
+| Pause | Esc / P | | Start (7) | **Both stick clicks together** / D8 |
+| Menus | arrows + Enter | 4 6 8 2 + Enter | Left stick / D-pad + A, Start | Left stick + right click |
+| Re-centre Arduino sticks | F9 | | | |
+| Help / Fullscreen / Screenshot | F1 / F11 / F12 | | | |
 
-### Setting up your lab-made gamepad
+In menus the buttons do different things too. In the shop: torch = up, map = down, sprint/pause = next heist.
+In pause: torch/sprint = quit to title, map = help. On the title screen: sprint/torch = change difficulty.
 
-Home-made pads report their own axis and button numbers, so calibrate once:
+### Arduino UNO two-stick pad (lab-made)
 
-1. Plug the pad in, run `gamepad_test.bat` (or `python vault_runner.py --joytest`).
-2. Move the left stick, then the right stick, and press each button. The screen prints e.g.
-   `axes [0.0, -1.0, 0.0, 0.0] pressed [4]` — note which axis moves and which button number shows.
-3. Open `vault_runner.py` and edit `CONFIG["gamepad"]` at the top:
-   `move_x`, `move_y` (left stick), `look_x` (right stick horizontal — often 2 or 3),
-   `invert_move_y`, `invert_look_x`, `deadzone` (raise it if the view drifts),
-   `look_speed`, and the `btn_*` numbers.
+A stock Arduino UNO is **not** seen by Windows as a gamepad. It's a USB serial (COM) port, so the
+game reads it directly over serial (the `pyserial` package).
+
+1. **Wiring** (KY-023 style stick modules, +5V→5V, GND→GND):
+   Left stick VRx→A0, VRy→A1, SW→D2 · Right stick VRx→A2, VRy→A3, SW→D3.
+   Optional buttons (pin to GND): D4 torch, D5 map, D6 sneak, D7 jump, D8 pause, D9 level view.
+2. **Flash** `arduino/vault_pad/vault_pad.ino` with the Arduino IDE (board: Arduino Uno).
+   If your UNO already runs its own sketch, keep it as long as it prints one line per reading with
+   the 4 stick values first and the buttons after (any separator or labels, any common baud rate).
+3. **Close the Arduino IDE Serial Monitor**, because only one program can use the COM port at a time.
+4. Run `gamepad_test.bat` without touching the sticks. It should say `Arduino: connected on COMx`.
+   Push each stick and check the values:
+   * left stick up → `move_y` negative · right → `move_x` positive
+   * right stick right → `look_x` positive · up → `look_y` negative
+   If one is reversed, set its `invert_…` flag in `CONFIG["arduino"]`. If the sticks are swapped, set `swap_sticks: True`.
+   If a stick drifts, raise `deadzone` or press F9 in game.
+5. Run `play.bat`. The title screen shows the pad status at the bottom.
+
+The sticks are calibrated from their resting position every time the game connects, so keep your
+thumbs off them for the first second. The game reconnects by itself if the cable is unplugged.
 
 ## 4. Customization menu — pick what you want
 
