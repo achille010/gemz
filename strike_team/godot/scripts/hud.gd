@@ -137,6 +137,12 @@ func _draw_down(p, W: float, H: float) -> void:
 	_t(f_num, c + Vector2(-60 * s, 14 * s), "%d" % int(ceil(p.bleed)), 44, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, 120 * s)
 	_t(f_bold, Vector2(0, c.y + 92 * s), "INCAPACITATED", 34, Color(1, 0.3, 0.25), HORIZONTAL_ALIGNMENT_CENTER, W)
 	var o = main.players[1 - idx]
+	if main.solo:
+		var t2 := "Using your medkit..." if p.has_medkit else "No medkit - you'll lose a life when the timer ends"
+		_t(f_semi, Vector2(0, c.y + 122 * s), t2, 19, Color(0.9, 0.9, 0.9), HORIZONTAL_ALIGNMENT_CENTER, W)
+		if p.revive_t > 0.0:
+			_progress(Vector2(W / 2.0, c.y + 175 * s), p.revive_t / (main.REVIVE_TIME + 1.0), "SELF-REVIVE", Color(0.4, 1, 0.55))
+		return
 	var tip := "Your teammate is bringing a medkit" if o.state == "alive" and o.has_medkit else ("Your teammate must find a MEDKIT" if o.state == "alive" else "No one can revive you")
 	_t(f_semi, Vector2(0, c.y + 122 * s), tip, 19, Color(0.9, 0.9, 0.9), HORIZONTAL_ALIGNMENT_CENTER, W)
 
@@ -164,7 +170,7 @@ func _draw_compass(p, W: float) -> void:
 	for m in main.objective_markers():
 		marks.append([m[0], Color(1, 0.82, 0.2)])
 	var o = main.players[1 - idx]
-	if o.state != "out":
+	if o.state != "out" and not main.solo:
 		marks.append([o.global_position, Color(1, 0.3, 0.3) if o.state == "down" else Color(0.3, 1, 0.45)])
 	for m in marks:
 		var rel: Vector3 = m[0] - p.global_position
@@ -261,7 +267,7 @@ func _draw_prompts(p, W: float, H: float, blink: bool) -> void:
 		var w := _tw(f_bold, t, 20) + 40 * s
 		_panel(Rect2(W / 2.0 - w / 2.0, 58 * s, w, 32 * s), 0.75)
 		_t(f_bold, Vector2(0, 81 * s), t, 20, Color(1, 0.35, 0.3) if blink else Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, W)
-	elif o.state == "out" and p.state == "alive":
+	elif o.state == "out" and p.state == "alive" and not main.solo:
 		_t(f_semi, Vector2(0, 80 * s), "%s IS OUT  -  YOU'RE ON YOUR OWN" % main.TEAM_NAMES[o.idx], 16, Color(0.85, 0.85, 0.85), HORIZONTAL_ALIGNMENT_CENTER, W)
 	if p.msg_t > 0.0:
 		var a := clampf(p.msg_t, 0.0, 1.0)
@@ -284,14 +290,16 @@ func _draw_world_markers(p, W: float, H: float) -> void:
 	for m in main.objective_markers():
 		list.append([m[0] + Vector3(0, 2.2, 0), m[1], Color(1, 0.82, 0.2), true])
 	var o = main.players[1 - idx]
-	if o.state == "down":
+	if main.solo:
+		pass
+	elif o.state == "down":
 		list.append([o.global_position + Vector3(0, 1.2, 0), "REVIVE", Color(1, 0.3, 0.3), true])
 	elif o.state == "alive":
 		list.append([o.global_position + Vector3(0, 2.75, 0), main.TEAM_NAMES[o.idx], main.TEAM_COLORS[o.idx].lightened(0.3), false])
 	var want := []
 	if p.reloads_left <= 3:
 		want.append(["ammo", "AMMO", Color(1, 1, 0.9)])
-	if not p.has_medkit and o.state == "down":
+	if not p.has_medkit and (o.state == "down" or (main.solo and p.hp < 50.0)):
 		want.append(["medkit", "MEDKIT", Color(1, 0.45, 0.7)])
 	for wv in want:
 		var best = null
@@ -339,7 +347,7 @@ func _draw_radar_frame(p, team: Color) -> void:
 	var aw := r.size.x - hw - 4.0 * s
 	draw_rect(Rect2(r.position.x + hw + 4.0 * s, by, aw, bh), Color(0.1, 0.18, 0.3, 0.8))
 	draw_rect(Rect2(r.position.x + hw + 4.0 * s, by, aw * clampf(p.reloads_left / 12.0, 0.0, 1.0), bh), Color(0.33, 0.6, 0.95))
-	_t(f_bold, Vector2(r.position.x, r.position.y - 8.0 * s), "P%d  %s" % [idx + 1, main.TEAM_NAMES[idx]], 15, team.lightened(0.25), HORIZONTAL_ALIGNMENT_LEFT, -1, 4.0)
+	_t(f_bold, Vector2(r.position.x, r.position.y - 8.0 * s), ("SOLO" if main.solo else "P%d  %s" % [idx + 1, main.TEAM_NAMES[idx]]), 15, team.lightened(0.25), HORIZONTAL_ALIGNMENT_LEFT, -1, 4.0)
 
 
 func _draw_radar() -> void:
@@ -388,7 +396,7 @@ func _draw_radar() -> void:
 		R.draw_colored_polygon(PackedVector2Array([v + Vector2(0, -d), v + Vector2(d, 0), v + Vector2(0, d), v + Vector2(-d, 0)]), Color(1, 0.82, 0.2))
 	# teammate: green dot, clamped to the edge (blinks red when down)
 	var o = main.players[1 - idx]
-	if o.state != "out":
+	if o.state != "out" and not main.solo:
 		var v := _edge(_rp(p, o.global_position, c, k), sz, 7.0 * s)
 		var oc := Color(0.3, 1, 0.45)
 		if o.state == "down":

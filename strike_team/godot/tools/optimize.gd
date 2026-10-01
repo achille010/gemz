@@ -6,7 +6,7 @@ extends SceneTree
 
 const DEFAULT_BUDGET := 6000
 const BUDGET := {
-	"pine": 9000, "fir": 9000, "tree": 12000, "quiver": 7000, "dead_tree": 4000,
+	"pine": 60000, "fir": 60000, "tree": 12000, "quiver": 7000, "dead_tree": 4000,
 	"boulder": 2500, "boulder2": 2500, "boulder3": 2000, "rocks_moss": 5000, "cliff": 7000,
 	"barrier": 2000, "barrier2": 2000, "hydrant": 2000, "shrub1": 5000, "shrub2": 6000, "shrub3": 3000,
 	"grass": 2500, "grass2": 2500, "fern": 2500, "shrub4": 3000, "lamp": 4000, "car": 9000,

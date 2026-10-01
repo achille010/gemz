@@ -54,6 +54,7 @@ var wave_t := 0.0
 var beep_t := 0.0
 var difficulty := 3
 var showcase := false
+var solo := false            # one pad: one player, full screen, medkit = self-revive
 var feed := []
 var stats := {"kills": 0, "shots": 0, "revives": 0, "downs": 0}
 
@@ -69,6 +70,8 @@ func _ready() -> void:
 			result_path = args[i + 1]
 		elif args[i] == "--assets" and i + 1 < args.size():
 			assets_dir = args[i + 1]
+		elif args[i] == "--solo":
+			solo = true
 		elif args[i] == "--showcase":
 			showcase = true
 		elif args[i] == "--shot" and i + 1 < args.size():
@@ -82,6 +85,7 @@ func _ready() -> void:
 	DisplayServer.window_set_title("STRIKE TEAM - " + str(mission.get("name", "")))
 	rng.seed = int(mission.get("seed", 1))
 	difficulty = int(mission.get("difficulty", 3))
+	solo = solo or bool(mission.get("solo", false))
 	udp.bind(UDP_PORT, "127.0.0.1")
 	_load_sounds()
 	_build_views()
@@ -132,7 +136,7 @@ func _build_views() -> void:
 		var cam := Camera3D.new()
 		cam.fov = 70.0
 		cam.near = 0.05
-		cam.far = 1200.0
+		cam.far = 600.0
 		cam.cull_mask = 0xFFFFF & ~(2 if i == 0 else 4) & ~(32 if i == 0 else 16)
 		vp.add_child(cam)
 		cam.current = true
@@ -243,6 +247,9 @@ func _do_showcase() -> void:
 	var bot = _spawn_bot(p0.global_position + fwd * 4.5 + right * 1.2, "soldier")
 	bot.set_physics_process(false)
 	bot.rotation.y = p0.yaw + PI
+	var victim = _spawn_bot(p0.global_position + fwd * 2.6 + right * 0.3, "soldier")
+	victim.set_physics_process(false)
+	get_tree().create_timer(4.0).timeout.connect(func(): victim.take_damage(500.0, p0))
 	var h := make_prop("hostage")
 	h.position = p0.global_position + fwd * 5.0 + right * 2.6
 	var k := 0
@@ -300,8 +307,7 @@ func make_soldier(color: Color, layer: int, enemy := false) -> Node3D:
 	if _soldier_ps == null:
 		return _block_soldier(color, layer, enemy)
 	var model: Node3D = _soldier_ps.instantiate()
-	model.rotation.y = PI
-	root.add_child(model)
+	root.add_child(model)                 # glTF import already faces -Z (forward)
 	_tint(model, color if enemy else Color(1, 1, 1).lerp(color, 0.22))
 	var ap: AnimationPlayer = model.find_child("AnimationPlayer", true, false)
 	if ap != null:
@@ -329,6 +335,58 @@ func make_soldier(color: Color, layer: int, enemy := false) -> Node3D:
 		ba.add_child(g)
 	_set_layers(root, layer)
 	return root
+
+
+const RAGDOLL_BONES := {
+	"mixamorig_Hips": 0.14, "mixamorig_Spine1": 0.13, "mixamorig_Head": 0.11,
+	"mixamorig_LeftArm": 0.05, "mixamorig_LeftForeArm": 0.045, "mixamorig_RightArm": 0.05, "mixamorig_RightForeArm": 0.045,
+	"mixamorig_LeftUpLeg": 0.075, "mixamorig_LeftLeg": 0.06, "mixamorig_RightUpLeg": 0.075, "mixamorig_RightLeg": 0.06,
+}
+
+
+## Physics ragdoll: the body collapses naturally instead of rotating stiffly.
+## `push` is the bullet direction (world space). Returns false if the model has no skeleton.
+func ragdoll(visual: Node3D, push: Vector3) -> bool:
+	var skel: Skeleton3D = visual.find_child("Skeleton3D", true, false)
+	if skel == null:
+		return false
+	var ap = visual.get_meta("ap", null)
+	if ap != null:
+		ap.pause()
+	var sim := PhysicalBoneSimulator3D.new()
+	skel.add_child(sim)
+	var gs := skel.global_transform.basis.get_scale().x
+	for bname in RAGDOLL_BONES:
+		var bi := skel.find_bone(bname)
+		if bi < 0:
+			continue
+		var pb := PhysicalBone3D.new()
+		pb.bone_name = bname
+		pb.joint_type = PhysicalBone3D.JOINT_TYPE_CONE if bname in ["mixamorig_Head", "mixamorig_LeftArm", "mixamorig_RightArm", "mixamorig_LeftUpLeg", "mixamorig_RightUpLeg", "mixamorig_Spine1"] else PhysicalBone3D.JOINT_TYPE_HINGE
+		pb.mass = 4.0
+		pb.friction = 0.9
+		pb.linear_damp = 0.4
+		pb.angular_damp = 2.0
+		pb.collision_layer = 0
+		pb.collision_mask = 1
+		# capsule from this bone towards its first child
+		var len := 0.25
+		var kids := skel.get_bone_children(bi)
+		if not kids.is_empty():
+			len = skel.get_bone_rest(kids[0]).origin.length() * gs
+		var cs := CollisionShape3D.new()
+		var cap := CapsuleShape3D.new()
+		cap.radius = RAGDOLL_BONES[bname]
+		cap.height = maxf(len, cap.radius * 2.2)
+		cs.shape = cap
+		pb.add_child(cs)
+		pb.body_offset = Transform3D(Basis(), Vector3(0, -len * 0.5 / maxf(gs, 0.0001), 0))
+		sim.add_child(pb)
+	sim.physical_bones_start_simulation()
+	for pb in sim.get_children():
+		if pb is PhysicalBone3D:
+			pb.apply_central_impulse(push.normalized() * 6.0 + Vector3(0, 1.0, 0))
+	return true
 
 
 func _soldier_idle() -> Animation:
@@ -480,6 +538,11 @@ func _spawn_players() -> void:
 		world.add_child(p)
 		p.setup(self, i, sp + Vector3(0, 0.1, 0), face, TEAM_COLORS[i])
 		players.append(p)
+		if solo and i == 1:
+			p.state = "out"
+			p.visible = false
+			p.col.disabled = true
+			p.set_physics_process(false)
 
 
 func _spawn_bot(pos: Vector3, kind := "soldier") -> Node:
@@ -492,7 +555,7 @@ func _spawn_bot(pos: Vector3, kind := "soldier") -> Node:
 func _spawn_enemies() -> void:
 	var mods: Array = mission.get("mods", [])
 	var spawn_avoid: Array = gen.spawn_points.duplicate()
-	for i in 12 + difficulty * 2:
+	for i in (8 + difficulty if solo else 12 + difficulty * 2):
 		var kind := "heavy" if randf() < (0.3 if mods.has("heavy") else 0.08) else "soldier"
 		_spawn_bot(gen.random_open(spawn_avoid, 40.0), kind)
 	for pt in objective.get("points", []):
@@ -813,7 +876,9 @@ func on_player_hit(_p, _from: Vector3) -> void:
 func on_player_down(p) -> void:
 	stats["downs"] += 1
 	var other = players[1 - p.idx]
-	if other.state == "alive":
+	if solo:
+		p.say("DOWN - your medkit will patch you up" if p.has_medkit else "DOWN - no medkit, you're bleeding out", 5.0)
+	elif other.state == "alive":
 		other.say("%s IS DOWN - grab a medkit and revive them" % TEAM_NAMES[p.idx], 5.0)
 	feed.push_front(["%s  IS DOWN" % TEAM_NAMES[p.idx], 4.0])
 
@@ -915,7 +980,7 @@ func _process(dt: float) -> void:
 		if p.state == "alive":
 			up.append(p.idx)
 	for i in 2:
-		holders[i].visible = up.size() != 1 or up[0] == i
+		holders[i].visible = (i == 0) if solo else (up.size() != 1 or up[0] == i)
 	for e in fx.duplicate():
 		e[1] -= dt
 		if e[1] <= 0.0:
@@ -991,6 +1056,18 @@ func _update_pickups(dt: float) -> void:
 
 
 func _update_revives(dt: float) -> void:
+	if solo:
+		var me = players[0]
+		if me.state == "down" and me.has_medkit:
+			me.revive_t += dt
+			if me.revive_t >= REVIVE_TIME + 1.0:
+				me.revive_t = 0.0
+				me.has_medkit = false
+				me.revive()
+				stats["revives"] += 1
+		else:
+			me.revive_t = 0.0
+		return
 	for p in players:
 		var o = players[1 - p.idx]
 		if p.state == "alive" and p.has_medkit and o.state == "down" and _flat_dist(p.global_position, o.global_position) < REVIVE_DIST:

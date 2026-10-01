@@ -422,7 +422,7 @@ func _block(i0: int, j0: int, w: int, d: int) -> void:
 	var r := rng.randf()
 	match biome_name:
 		"urban":
-			kind = "city" if r < 0.6 else ("park" if r < 0.8 else "lot")
+			kind = "city" if r < 0.7 else ("park" if r < 0.8 else "lot")
 		"base":
 			kind = "hangar" if r < 0.35 else ("barracks" if r < 0.7 else "yard")
 		"docks":
@@ -446,7 +446,6 @@ func _block(i0: int, j0: int, w: int, d: int) -> void:
 				j += 1
 			_scatter_cover(i0, j0, w, d, ["car", "barrier", "trashcan", "cardboard", "barrel2", "utility", "hydrant"], 0.14)
 		"park":
-			_scatter_trees(i0, j0, w, d, 0.35)
 			_scatter_cover(i0, j0, w, d, ["barrier2", "trashcan", "shrub2", "boulder"], 0.08)
 			_scatter_grass(i0, j0, w, d, 260)
 		"lot":

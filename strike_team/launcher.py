@@ -145,6 +145,7 @@ class App:
     def menu_items(self):
         n = self.save["campaign"]
         return [("Campaign - Mission %d" % n, "campaign"), ("Random Operation", "random"),
+                ("Solo Operation  (1 pad)", "solo"),
                 ("Controller Check (pads / Bluetooth)", "pads"), ("Hardware Guide", "guide"), ("Quit", "quit")]
 
     def do(self, action):
@@ -153,6 +154,9 @@ class App:
             self.screen_name, self.sel = "brief", 0
         elif action == "random":
             self.mission = missions.generate()
+            self.screen_name, self.sel = "brief", 0
+        elif action == "solo":
+            self.mission = missions.generate(solo=True)
             self.screen_name, self.sel = "brief", 0
         elif action == "pads":
             self.screen_name = "pads"
@@ -302,11 +306,11 @@ class App:
             if self.sel == 0:
                 self.start_mission()
             elif m.get("campaign_no") is None:
-                self.mission = missions.generate()
+                self.mission = missions.generate(solo=m.get("solo", False))
             else:
                 self.screen_name, self.sel = "menu", 0
             return
-        camp = f"CAMPAIGN MISSION {m['campaign_no']}" if m.get("campaign_no") else "RANDOM OPERATION"
+        camp = f"CAMPAIGN MISSION {m['campaign_no']}" if m.get("campaign_no") else ("SOLO OPERATION" if m.get("solo") else "RANDOM OPERATION")
         self.frame(f"{camp}  -  {m['code']}")
         W, _ = self.screen.get_size()
         x = 90
@@ -323,7 +327,8 @@ class App:
         for t in m["mod_text"]:
             self.text("!  " + t, (x, y + 6), self.f, (255, 160, 90))
             y += 28
-        self.text("3 lives each  -  downed? your mate has 60 s to bring a medkit  -  both down = mission failed",
+        self.text("3 lives  -  downed? a medkit you carry revives you, otherwise you lose a life after 60 s" if m.get("solo") else
+                  "3 lives each  -  downed? your mate has 60 s to bring a medkit  -  both down = mission failed",
                   (x, y + 18), self.f, DIM)
         for k, o in enumerate(opts):
             yy = y + 70 + k * 46

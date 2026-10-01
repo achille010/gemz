@@ -52,7 +52,7 @@ NOUN = ["Dawn", "Viper", "Anvil", "Harbor", "Echo", "Spear", "Lantern", "Falcon"
         "Serpent", "Shield", "Storm", "Reaper", "Gate", "Wolf", "Ember", "Raven", "Horizon", "Fortress"]
 
 
-def generate(seed=None, campaign_no=None):
+def generate(seed=None, campaign_no=None, solo=False):
     if seed is None:
         seed = random.randrange(1, 10 ** 6) if campaign_no is None else 1000 + campaign_no * 7919
     rng = random.Random(seed)
@@ -79,7 +79,10 @@ def generate(seed=None, campaign_no=None):
         time_limit = 660 - diff * 25
     tname, brief = TASKS[task]
     brief = brief.format(map=BIOMES[biome], targets=params["targets"], hold=params["hold_time"], cases=params["cases"])
+    if solo:
+        diff = max(1, diff - 2)              # one player: a little more forgiving
     return {
+        "solo": solo,
         "name": f"Operation {rng.choice(ADJ)} {rng.choice(NOUN)}",
         "code": f"OP-{seed:06d}",
         "campaign_no": campaign_no,

@@ -89,13 +89,23 @@ func _die(by) -> void:
 	collision_layer = 0
 	collision_mask = 1
 	main.on_bot_killed(self, by)
-	var tw := create_tween()
+	var push: Vector3 = (global_position - by.global_position) if by != null else Vector3(randf() - 0.5, 0, randf() - 0.5)
+	push.y = 0.0
+	if push.length() < 0.01:
+		push = -global_transform.basis.z
+	# freeze mid-stride, then fall away from the shooter with a small bounce
 	var ap = visual.get_meta("ap", null)
 	if ap != null:
+		ap.play("Run")
+		ap.seek(randf_range(0.1, 0.5), true)
 		ap.pause()
-	tw.tween_property(visual, "rotation:x", -1.45, 0.45).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	tw.tween_interval(6.0)
-	tw.tween_callback(queue_free)
+	var local := (global_transform.basis.inverse() * push).normalized()
+	var axis := Vector3.UP.cross(local).normalized()
+	var target := Quaternion(axis, PI / 2.0 * randf_range(0.92, 1.0)) * Quaternion(Vector3.UP, randf_range(-0.4, 0.4))
+	var tw := create_tween()
+	tw.tween_property(visual, "quaternion", target, 0.75).set_trans(Tween.TRANS_BOUNCE).set_ease(Tween.EASE_OUT)
+	tw.parallel().tween_property(visual, "position:y", 0.12, 0.75)
+	get_tree().create_timer(8.0).timeout.connect(queue_free)
 
 
 func _eye() -> Vector3:
