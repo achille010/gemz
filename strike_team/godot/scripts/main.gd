@@ -399,7 +399,7 @@ func _tint(n: Node, tint: Color) -> void:
 		_tint(c, tint)
 
 
-func make_soldier(color: Color, layer: int, enemy := false) -> Node3D:
+func make_soldier(color: Color, layer: int, enemy := false, _hide_head := false) -> Node3D:
 	var root := Node3D.new()
 	if _soldier_ps == null and ResourceLoader.exists("res://characters/soldier.glb"):
 		_soldier_ps = load("res://characters/soldier.glb")
@@ -1085,7 +1085,9 @@ func get_input(i: int) -> Dictionary:
 	var yaw_delta := 0.0
 	var pitch_delta := 0.0
 	if solo and i == 0:
-		yaw_delta = -mouse_delta.x * MOUSE_SENS
+		# mouse right -> turn right. yaw is subtracted in player.gd so a positive
+		# delta here means "turn right" (yaw decreases, which is CW from above).
+		yaw_delta = mouse_delta.x * MOUSE_SENS
 		pitch_delta = -mouse_delta.y * MOUSE_SENS
 		mouse_delta = Vector2.ZERO
 		fire = fire or mouse_fire
