@@ -31,6 +31,10 @@ var pad_state := [[0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0]]
 var pad_time := [-10.0, -10.0]
 var crouch_prev := [false, false]
 var kb_look := [Vector2.ZERO, Vector2.ZERO]       # smoothed keyboard look input (0..1 each axis)
+var mouse_delta := Vector2.ZERO                   # solo-mode mouse look accumulator
+var mouse_fire := false
+var mouse_aim := false
+const MOUSE_SENS := 0.0025
 var rng := RandomNumberGenerator.new()
 var gen
 var world: Node3D
@@ -100,6 +104,8 @@ func _ready() -> void:
 	_build_overlay()
 	if showcase:
 		_do_showcase()
+	if solo:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	if sounds.has("music"):
 		var mp := AudioStreamPlayer.new()
 		mp.stream = sounds["music"]
@@ -1010,6 +1016,26 @@ func _k(key: int) -> float:
 	return 1.0 if Input.is_physical_key_pressed(key) else 0.0
 
 
+func _input(ev: InputEvent) -> void:
+	if not solo:
+		return
+	if ev is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		mouse_delta += (ev as InputEventMouseMotion).relative
+	elif ev is InputEventMouseButton:
+		var mb := ev as InputEventMouseButton
+		if mb.button_index == MOUSE_BUTTON_LEFT:
+			mouse_fire = mb.pressed
+		elif mb.button_index == MOUSE_BUTTON_RIGHT:
+			mouse_aim = mb.pressed
+	elif ev is InputEventKey and (ev as InputEventKey).pressed and (ev as InputEventKey).keycode == KEY_ESCAPE:
+		# first Escape releases the mouse so the user can move the pointer; second Escape quits
+		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+			get_viewport().set_input_as_handled()
+	elif ev is InputEventMouseButton and (ev as InputEventMouseButton).pressed and Input.mouse_mode == Input.MOUSE_MODE_VISIBLE:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
 func get_input(i: int) -> Dictionary:
 	var mv := Vector2.ZERO
 	var lk := Vector2.ZERO
@@ -1054,9 +1080,21 @@ func get_input(i: int) -> Dictionary:
 	crouch = crouch or Input.is_physical_key_pressed(k[8])
 	fire = fire or Input.is_physical_key_pressed(k[9])
 	aim = aim or Input.is_physical_key_pressed(k[10])
+	# solo mouse look: pointer motion drives P1's look as a direct yaw/pitch delta (bypasses dt);
+	# LMB fires, RMB scopes
+	var yaw_delta := 0.0
+	var pitch_delta := 0.0
+	if solo and i == 0:
+		yaw_delta = -mouse_delta.x * MOUSE_SENS
+		pitch_delta = -mouse_delta.y * MOUSE_SENS
+		mouse_delta = Vector2.ZERO
+		fire = fire or mouse_fire
+		aim = aim or mouse_aim
 	var pressed: bool = crouch and not crouch_prev[i]
 	crouch_prev[i] = crouch
-	return {"move": mv.limit_length(1.0), "look": lk.limit_length(1.0), "crouch_pressed": pressed, "fire": fire, "aim": aim}
+	return {"move": mv.limit_length(1.0), "look": lk.limit_length(1.0),
+		"crouch_pressed": pressed, "fire": fire, "aim": aim,
+		"yaw_delta": yaw_delta, "pitch_delta": pitch_delta}
 
 
 func _poll_udp() -> void:

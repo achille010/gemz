@@ -159,7 +159,7 @@ func _physics_process(dt: float) -> void:
 	var local_vx := 0.0
 	if state == "alive":
 		local_vx = Vector2.from_angle(-yaw).rotated(-PI / 2.0).dot(Vector2(velocity.x, velocity.z))
-	var strafe_lean := clamp(local_vx * 0.06, -0.25, 0.25)
+	var strafe_lean: float = clampf(local_vx * 0.06, -0.25, 0.25)
 	var reload_z := sin(main.elapsed * 9.0) * 0.08 * reload_anim_t
 	visual.rotation.z = lerp(visual.rotation.z, reload_z + strafe_lean, dt * 10.0)
 	visual.scale.y = lerp(visual.scale.y, (0.72 if crouched and state == "alive" else 1.0), dt * 10.0)
@@ -175,15 +175,16 @@ func _alive(dt: float, inp: Dictionary) -> void:
 	# scope input - only valid when a bullet is actually chambered
 	aiming = bool(inp.get("aim", false)) and mag > 0 and reload_t <= 0.0
 	aim_t = clamp(aim_t + (dt * 6.5 if aiming else -dt * 7.0), 0.0, 1.0)
-	var look_slow := lerp(1.0, 0.35, aim_t)      # scoped = finer aim
-	var move_slow := lerp(1.0, 0.45, aim_t)      # scoped = planted stance
+	var look_slow: float = lerpf(1.0, 0.35, aim_t)      # scoped = finer aim
+	var move_slow: float = lerpf(1.0, 0.45, aim_t)      # scoped = planted stance
 	var lk: Vector2 = inp["look"]
-	yaw -= lk.x * YAW_RATE * look_slow * dt
-	pitch = clamp(pitch + lk.y * PITCH_RATE * look_slow * dt, deg_to_rad(-PITCH_LIMIT), deg_to_rad(PITCH_LIMIT))
+	var ms: float = look_slow        # scope sensitivity multiplier applies to mouse too
+	yaw -= lk.x * YAW_RATE * look_slow * dt + float(inp.get("yaw_delta", 0.0)) * ms
+	pitch = clamp(pitch + lk.y * PITCH_RATE * look_slow * dt + float(inp.get("pitch_delta", 0.0)) * ms, deg_to_rad(-PITCH_LIMIT), deg_to_rad(PITCH_LIMIT))
 	var mv: Vector2 = inp["move"]
 	var b := Basis(Vector3.UP, yaw)
 	var dir := (-b.z * mv.y + b.x * mv.x)
-	var spd := (CROUCH_WALK if crouched else WALK) * move_slow
+	var spd: float = (CROUCH_WALK if crouched else WALK) * move_slow
 	velocity.x = lerp(velocity.x, dir.x * spd, min(1.0, dt * 12.0))
 	velocity.z = lerp(velocity.z, dir.z * spd, min(1.0, dt * 12.0))
 	if mv.length() > 0.2 and is_on_floor():
@@ -232,7 +233,7 @@ func _shoot() -> void:
 		var c = hit["collider"]
 		if c != null and c.is_in_group("bot"):
 			var headshot: bool = end.y - c.global_position.y > 1.45
-			var body_dmg: float = lerp(34.0, 110.0, aim_t)   # fully scoped = one-shot a soldier, two-shot a heavy
+			var body_dmg: float = lerpf(34.0, 110.0, aim_t)   # fully scoped = one-shot a soldier, two-shot a heavy
 			c.take_damage(100.0 if headshot else body_dmg, self, headshot)
 			hitmark = 0.15
 			main.play_sfx("hit", global_position, -8.0)
