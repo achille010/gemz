@@ -155,8 +155,13 @@ func _physics_process(dt: float) -> void:
 	var reload_lean: float = reload_anim_t * 0.25
 	var base_x := -1.35 if state == "down" else (aim_lean + recoil_lean + reload_lean)
 	visual.rotation.x = lerp(visual.rotation.x, base_x, dt * 12.0)
+	# strafe lean: tilt the whole body sideways when sliding left/right (local x velocity)
+	var local_vx := 0.0
+	if state == "alive":
+		local_vx = Vector2.from_angle(-yaw).rotated(-PI / 2.0).dot(Vector2(velocity.x, velocity.z))
+	var strafe_lean := clamp(local_vx * 0.06, -0.25, 0.25)
 	var reload_z := sin(main.elapsed * 9.0) * 0.08 * reload_anim_t
-	visual.rotation.z = lerp(visual.rotation.z, reload_z, dt * 10.0)
+	visual.rotation.z = lerp(visual.rotation.z, reload_z + strafe_lean, dt * 10.0)
 	visual.scale.y = lerp(visual.scale.y, (0.72 if crouched and state == "alive" else 1.0), dt * 10.0)
 	var speed := Vector2(velocity.x, velocity.z).length() if state == "alive" else 0.0
 	main.animate(visual, speed, {"crouched": crouched, "firing": fire_anim_t > 0.3, "reloading": reload_t > 0.0})
@@ -264,6 +269,16 @@ func go_down() -> void:
 	reload_t = 0.0
 	shape.height = 0.8
 	col.position.y = 0.4
+	aim_t = 0.0
+	aiming = false
+	# collapse animation: whichever direction we were hit from pushes the ragdoll
+	var push := Vector3.ZERO
+	if not hit_dirs.is_empty():
+		push = global_position - hit_dirs.back()[0]
+	push.y = 0.0
+	if push.length() < 0.1:
+		push = -global_transform.basis.z
+	main.ragdoll(visual, push)
 	main.drop_carried(self)
 	main.play_sfx("down", global_position, 0.0)
 	main.on_player_down(self)
@@ -285,8 +300,18 @@ func revive() -> void:
 	regen_delay = 3.0
 	shape.height = 1.8
 	col.position.y = 0.9
+	_rebuild_visual()
 	main.play_sfx("revive", global_position, 0.0)
 	say("REVIVED - get back in the fight")
+
+
+func _rebuild_visual() -> void:
+	# Ragdoll leaves a PhysicalBoneSimulator in the visual - swap in a fresh standing model.
+	if visual != null and is_instance_valid(visual):
+		visual.queue_free()
+	var layer := 2 if idx == 0 else 4
+	visual = main.make_soldier(team_color, layer)
+	add_child(visual)
 
 
 func lose_life() -> void:
@@ -302,6 +327,7 @@ func lose_life() -> void:
 		reload_t = 0.0
 		shape.height = 1.8
 		col.position.y = 0.9
+		_rebuild_visual()
 		say("Bled out - %d %s left. Back at spawn." % [lives, "life" if lives == 1 else "lives"], 4.0)
 	else:
 		state = "out"

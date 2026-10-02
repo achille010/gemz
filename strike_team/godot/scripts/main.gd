@@ -158,6 +158,45 @@ func _build_views() -> void:
 		hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		holder.add_child(hud)
 		holders.append(holder)
+		if solo and i == 1:
+			holder.visible = false     # P2 panel completely gone - P1 holder expands to full width
+
+
+func _fp_arm(pos: Vector3, rot: Vector3, skin: Color, sleeve: Color, layer: int) -> Node3D:
+	# A tiny arm: capsule forearm + sphere fist, rendered on the viewmodel layer only.
+	var root := Node3D.new()
+	root.position = pos
+	root.rotation = rot
+	var sleeve_m := StandardMaterial3D.new()
+	sleeve_m.albedo_color = sleeve
+	sleeve_m.roughness = 0.9
+	var forearm := MeshInstance3D.new()
+	var fcap := CapsuleMesh.new()
+	fcap.radius = 0.035
+	fcap.height = 0.17
+	forearm.mesh = fcap
+	forearm.material_override = sleeve_m
+	forearm.rotation_degrees = Vector3(90, 0, 0)   # lie flat along -Z (towards camera-forward)
+	forearm.position = Vector3(0, 0, 0.085)
+	forearm.layers = layer
+	forearm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(forearm)
+	var skin_m := StandardMaterial3D.new()
+	skin_m.albedo_color = skin
+	skin_m.roughness = 0.75
+	var fist := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.045
+	sm.height = 0.09
+	sm.radial_segments = 10
+	sm.rings = 6
+	fist.mesh = sm
+	fist.material_override = skin_m
+	fist.position = Vector3(0, 0, 0.0)
+	fist.layers = layer
+	fist.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(fist)
+	return root
 
 
 func _make_scope_overlay() -> Control:
@@ -219,6 +258,14 @@ func _make_viewmodel(cam: Camera3D, layer: int) -> Node3D:
 		mi.position = -(Basis(Vector3.UP, deg_to_rad(RIFLE_YAW)) * c) * 0.6
 		mi.scale = Vector3.ONE * 0.6
 		vm.add_child(mi)
+	# Visible first-person hands: two gloved fists and forearms gripping the rifle.
+	# Simple capsules so the player sees themselves holding the gun from P1's viewpoint.
+	var skin := Color(0.82, 0.68, 0.55)
+	var sleeve := Color(0.25, 0.3, 0.2)   # fatigue green
+	# right hand (trigger) - closer and lower
+	vm.add_child(_fp_arm(Vector3(0.03, -0.03, -0.08), Vector3(deg_to_rad(-18), deg_to_rad(10), deg_to_rad(-6)), skin, sleeve, layer))
+	# left hand (forestock) - further forward, cradling the barrel
+	vm.add_child(_fp_arm(Vector3(-0.09, -0.05, -0.36), Vector3(deg_to_rad(-32), deg_to_rad(-18), deg_to_rad(14)), skin, sleeve, layer))
 	var g := Gradient.new()
 	g.set_color(0, Color(1.0, 0.9, 0.6, 1.0))
 	g.set_color(1, Color(1.0, 0.45, 0.1, 0.0))
@@ -1061,8 +1108,9 @@ func _process(dt: float) -> void:
 	for p in players:
 		if p.state == "alive":
 			up.append(p.idx)
-	for i in 2:
-		holders[i].visible = (i == 0) if solo else (up.size() != 1 or up[0] == i)
+	if not solo:                        # in solo P2 panel is permanently hidden
+		for i in 2:
+			holders[i].visible = (up.size() != 1 or up[0] == i)
 	for e in fx.duplicate():
 		e[1] -= dt
 		if e[1] <= 0.0:

@@ -175,11 +175,11 @@ func _environment(tod: String, mods: Array) -> void:
 	env.adjustment_saturation = 0.95 if biome_name != "desert" else 0.9
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_depth_begin = 60.0
-	env.fog_depth_end = 900.0
-	env.fog_density = 0.6
-	env.fog_aerial_perspective = 0.85
-	env.fog_sky_affect = 0.15
+	env.fog_depth_begin = 55.0
+	env.fog_depth_end = 210.0        # matches cam.far so distant geometry fades out cleanly
+	env.fog_density = 0.08           # was 0.6 - the whole scene used to wash out white
+	env.fog_aerial_perspective = 0.35
+	env.fog_sky_affect = 0.0
 	if "fog" in mods:
 		env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
 		env.fog_density = 0.018
