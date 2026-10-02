@@ -235,11 +235,13 @@ func _draw_weapon(p, W: float, H: float, team: Color, blink: bool) -> void:
 		var c := team if i < p.lives else Color(1, 1, 1, 0.15)
 		var cx := x + pw - 30 * s - i * 22 * s
 		draw_colored_polygon(PackedVector2Array([Vector2(cx, y + 12 * s), Vector2(cx + 8 * s, y + 18 * s), Vector2(cx + 6 * s, y + 30 * s), Vector2(cx - 6 * s, y + 30 * s), Vector2(cx - 8 * s, y + 18 * s)]), c)
-	if p.has_medkit:
+	if p.medkits > 0:
 		var m := Vector2(x - 34 * s, y + ph - 26 * s)
-		draw_rect(Rect2(m - Vector2(16, 14) * s, Vector2(32, 28) * s), Color(0.95, 0.95, 0.95, 0.95))
+		var alpha: float = 1.0 if p.state == "alive" else 0.6
+		draw_rect(Rect2(m - Vector2(16, 14) * s, Vector2(32, 28) * s), Color(0.95, 0.95, 0.95, alpha))
 		draw_rect(Rect2(m - Vector2(10, 3.5) * s, Vector2(20, 7) * s), Color(0.9, 0.1, 0.15))
 		draw_rect(Rect2(m - Vector2(3.5, 10) * s, Vector2(7, 20) * s), Color(0.9, 0.1, 0.15))
+		_t(f_bold, Vector2(m.x + 14 * s, m.y - 20 * s), "x%d" % p.medkits, 18, Color(1, 1, 1), HORIZONTAL_ALIGNMENT_LEFT, 40 * s)
 	if p.crouched and p.state == "alive":
 		_t(f_bold, Vector2(x + 18 * s, y - 8 * s), "CROUCHED", 14, Color(0.8, 0.85, 0.9))
 
