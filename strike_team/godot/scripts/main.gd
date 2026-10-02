@@ -19,8 +19,8 @@ const REVIVE_TIME := 3.0
 const REVIVE_DIST := 2.4
 const EXTRACT_RADIUS := 6.0
 const KEYS := [
-	[KEY_W, KEY_S, KEY_A, KEY_D, KEY_R, KEY_F, KEY_Q, KEY_E, KEY_C, KEY_SPACE],
-	[KEY_I, KEY_K, KEY_J, KEY_L, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SHIFT, KEY_ENTER],
+	[KEY_W, KEY_S, KEY_A, KEY_D, KEY_R, KEY_F, KEY_Q, KEY_E, KEY_C, KEY_SPACE, KEY_V],
+	[KEY_I, KEY_K, KEY_J, KEY_L, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SHIFT, KEY_ENTER, KEY_PERIOD],
 ]
 
 var mission := {}
@@ -37,6 +37,7 @@ var world: Node3D
 var holders := []
 var cams := []
 var viewmodels := []
+var scope_overlays := []
 var players := []
 var pickups := []
 var objective := {}
@@ -147,6 +148,9 @@ func _build_views() -> void:
 		cam.current = true
 		cams.append(cam)
 		viewmodels.append(_make_viewmodel(cam, 16 if i == 0 else 32))
+		var scope := _make_scope_overlay()
+		holder.add_child(scope)
+		scope_overlays.append(scope)
 		var hud := HudScript.new()
 		hud.main = self
 		hud.idx = i
@@ -154,6 +158,47 @@ func _build_views() -> void:
 		hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		holder.add_child(hud)
 		holders.append(holder)
+
+
+func _make_scope_overlay() -> Control:
+	# Classic sniper scope: black vignette with a circular lens cut out, thin crosshair.
+	var root := Control.new()
+	root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	root.modulate.a = 0.0
+	var vign := ColorRect.new()
+	vign.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	vign.color = Color(1, 1, 1, 1)
+	var sh := Shader.new()
+	sh.code = """shader_type canvas_item;
+void fragment() {
+	vec2 uv = (UV - vec2(0.5)) * vec2(16.0 / 9.0, 1.0);
+	float r = length(uv);
+	float lens = smoothstep(0.32, 0.335, r);
+	float ring = smoothstep(0.33, 0.32, r) * smoothstep(0.30, 0.315, r);
+	float a = lens + ring * 0.5;
+	COLOR = vec4(0.0, 0.0, 0.0, clamp(a, 0.0, 1.0));
+}
+"""
+	var sm := ShaderMaterial.new()
+	sm.shader = sh
+	vign.material = sm
+	root.add_child(vign)
+	var cross_h := ColorRect.new()
+	cross_h.color = Color(0, 0, 0, 0.9)
+	cross_h.anchor_left = 0.5; cross_h.anchor_right = 0.5
+	cross_h.anchor_top = 0.5; cross_h.anchor_bottom = 0.5
+	cross_h.offset_left = -60; cross_h.offset_right = 60
+	cross_h.offset_top = -1; cross_h.offset_bottom = 1
+	root.add_child(cross_h)
+	var cross_v := ColorRect.new()
+	cross_v.color = Color(0, 0, 0, 0.9)
+	cross_v.anchor_left = 0.5; cross_v.anchor_right = 0.5
+	cross_v.anchor_top = 0.5; cross_v.anchor_bottom = 0.5
+	cross_v.offset_left = -1; cross_v.offset_right = 1
+	cross_v.offset_top = -60; cross_v.offset_bottom = 60
+	root.add_child(cross_v)
+	return root
 
 
 const RIFLE_YAW := 90.0
@@ -927,6 +972,7 @@ func get_input(i: int) -> Dictionary:
 	var lk := Vector2.ZERO
 	var crouch := false
 	var fire := false
+	var aim := false
 	var now := Time.get_ticks_msec() / 1000.0
 	if now - pad_time[i] < 0.6:
 		var p: Array = pad_state[i]
@@ -934,6 +980,9 @@ func get_input(i: int) -> Dictionary:
 		lk += Vector2(float(p[2]), float(p[3]))
 		crouch = crouch or float(p[4]) > 0.5
 		fire = fire or float(p[5]) > 0.5
+		# Arduino 2-button pad fallback: crouched + fire held = scope on
+		if crouch and fire:
+			aim = true
 	var joys := Input.get_connected_joypads()
 	if i < joys.size():
 		var d: int = joys[i]
@@ -945,6 +994,7 @@ func get_input(i: int) -> Dictionary:
 			lk += r
 		crouch = crouch or Input.is_joy_button_pressed(d, JOY_BUTTON_LEFT_STICK) or Input.is_joy_button_pressed(d, JOY_BUTTON_B)
 		fire = fire or Input.is_joy_button_pressed(d, JOY_BUTTON_RIGHT_STICK) or Input.get_joy_axis(d, JOY_AXIS_TRIGGER_RIGHT) > 0.4
+		aim = aim or Input.get_joy_axis(d, JOY_AXIS_TRIGGER_LEFT) > 0.4 or Input.is_joy_button_pressed(d, JOY_BUTTON_LEFT_SHOULDER)
 	var k: Array = KEYS[i]
 	mv += Vector2(_k(k[3]) - _k(k[2]), _k(k[0]) - _k(k[1]))
 	# keyboard look eases from 0 toward target so turning doesn't snap on at full speed
@@ -960,9 +1010,10 @@ func get_input(i: int) -> Dictionary:
 	lk += kb_look[i]
 	crouch = crouch or Input.is_physical_key_pressed(k[8])
 	fire = fire or Input.is_physical_key_pressed(k[9])
+	aim = aim or Input.is_physical_key_pressed(k[10])
 	var pressed: bool = crouch and not crouch_prev[i]
 	crouch_prev[i] = crouch
-	return {"move": mv.limit_length(1.0), "look": lk.limit_length(1.0), "crouch_pressed": pressed, "fire": fire}
+	return {"move": mv.limit_length(1.0), "look": lk.limit_length(1.0), "crouch_pressed": pressed, "fire": fire, "aim": aim}
 
 
 func _poll_udp() -> void:
@@ -988,11 +1039,17 @@ func _process(dt: float) -> void:
 			continue
 		var p = players[i]
 		cams[i].global_transform = p.head.global_transform
+		cams[i].fov = lerp(70.0, 32.0, p.aim_t)
 		var vm: Node3D = viewmodels[i]
 		vm.visible = p.state == "alive"
-		var bob := sin(elapsed * 9.0) * 0.01 * minf(1.0, Vector2(p.velocity.x, p.velocity.z).length() / 4.0)
+		var bob := sin(elapsed * 9.0) * 0.01 * minf(1.0, Vector2(p.velocity.x, p.velocity.z).length() / 4.0) * (1.0 - p.aim_t)
 		var rel := 0.25 if p.reload_t > 0.0 else 0.0
-		vm.position = vm.position.lerp(Vector3(0.2, -0.19 - rel + bob, -0.5 + p.kick * 3.0), minf(1.0, dt * 14.0))
+		# scoped: rifle pulls to centre of screen for a sight picture
+		var hip := Vector3(0.2, -0.19 - rel + bob, -0.5 + p.kick * 3.0)
+		var ads := Vector3(0.0, -0.08 + bob, -0.32 + p.kick * 2.0)
+		vm.position = vm.position.lerp(hip.lerp(ads, p.aim_t), minf(1.0, dt * 14.0))
+		if scope_overlays.size() > i and scope_overlays[i] != null:
+			scope_overlays[i].modulate.a = p.aim_t
 		var firing: bool = p.fire_cd > 0.06 and p.mag > 0 and p.reload_t <= 0.0 and p.state == "alive"
 		vm.get_child(vm.get_child_count() - 1).light_energy = 3.0 if firing else 0.0
 		var spr: Node3D = vm.get_child(vm.get_child_count() - 2)

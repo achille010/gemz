@@ -50,6 +50,10 @@ var hit_dirs := []
 var fire_anim_t := 0.0
 var reload_prev := 0.0
 var reload_anim_t := 0.0
+var aim_t := 0.0                    # 0 = hip-fire, 1 = fully scoped
+var aiming := false
+const SCOPE_FOV := 32.0
+const HIP_FOV := 70.0
 
 
 func setup(m, i: int, pos: Vector3, look_yaw: float, color: Color) -> void:
@@ -163,13 +167,18 @@ func _alive(dt: float, inp: Dictionary) -> void:
 		crouched = not crouched
 		shape.height = 1.2 if crouched else 1.8
 		col.position.y = shape.height / 2.0
+	# scope input - only valid when a bullet is actually chambered
+	aiming = bool(inp.get("aim", false)) and mag > 0 and reload_t <= 0.0
+	aim_t = clamp(aim_t + (dt * 6.5 if aiming else -dt * 7.0), 0.0, 1.0)
+	var look_slow := lerp(1.0, 0.35, aim_t)      # scoped = finer aim
+	var move_slow := lerp(1.0, 0.45, aim_t)      # scoped = planted stance
 	var lk: Vector2 = inp["look"]
-	yaw -= lk.x * YAW_RATE * dt
-	pitch = clamp(pitch + lk.y * PITCH_RATE * dt, deg_to_rad(-PITCH_LIMIT), deg_to_rad(PITCH_LIMIT))
+	yaw -= lk.x * YAW_RATE * look_slow * dt
+	pitch = clamp(pitch + lk.y * PITCH_RATE * look_slow * dt, deg_to_rad(-PITCH_LIMIT), deg_to_rad(PITCH_LIMIT))
 	var mv: Vector2 = inp["move"]
 	var b := Basis(Vector3.UP, yaw)
 	var dir := (-b.z * mv.y + b.x * mv.x)
-	var spd := CROUCH_WALK if crouched else WALK
+	var spd := (CROUCH_WALK if crouched else WALK) * move_slow
 	velocity.x = lerp(velocity.x, dir.x * spd, min(1.0, dt * 12.0))
 	velocity.z = lerp(velocity.z, dir.z * spd, min(1.0, dt * 12.0))
 	if mv.length() > 0.2 and is_on_floor():
@@ -205,7 +214,8 @@ func _shoot() -> void:
 	fire_cd = 0.1
 	main.stats["shots"] += 1
 	var t := head.global_transform
-	var spread := (0.010 if crouched else 0.022) + recoil
+	var base_spread := (0.010 if crouched else 0.022) + recoil
+	var spread: float = lerp(base_spread, 0.0008, aim_t)   # scoped shots are near-perfectly on-reticle
 	var dir := (-t.basis.z + t.basis.x * randf_range(-spread, spread) + t.basis.y * randf_range(-spread, spread)).normalized()
 	var from := t.origin
 	var q := PhysicsRayQueryParameters3D.create(from, from + dir * 250.0, 1 | 4)
@@ -217,7 +227,8 @@ func _shoot() -> void:
 		var c = hit["collider"]
 		if c != null and c.is_in_group("bot"):
 			var headshot: bool = end.y - c.global_position.y > 1.45
-			c.take_damage(100.0 if headshot else 34.0, self, headshot)
+			var body_dmg: float = lerp(34.0, 110.0, aim_t)   # fully scoped = one-shot a soldier, two-shot a heavy
+			c.take_damage(100.0 if headshot else body_dmg, self, headshot)
 			hitmark = 0.15
 			main.play_sfx("hit", global_position, -8.0)
 		main.spawn_impact(end, c != null and c.is_in_group("bot"))
