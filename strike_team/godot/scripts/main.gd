@@ -258,14 +258,10 @@ func _make_viewmodel(cam: Camera3D, layer: int) -> Node3D:
 		mi.position = -(Basis(Vector3.UP, deg_to_rad(RIFLE_YAW)) * c) * 0.6
 		mi.scale = Vector3.ONE * 0.6
 		vm.add_child(mi)
-	# Visible first-person hands: two gloved fists and forearms gripping the rifle.
-	# Simple capsules so the player sees themselves holding the gun from P1's viewpoint.
-	var skin := Color(0.82, 0.68, 0.55)
-	var sleeve := Color(0.25, 0.3, 0.2)   # fatigue green
-	# right hand (trigger) - closer and lower
-	vm.add_child(_fp_arm(Vector3(0.03, -0.03, -0.08), Vector3(deg_to_rad(-18), deg_to_rad(10), deg_to_rad(-6)), skin, sleeve, layer))
-	# left hand (forestock) - further forward, cradling the barrel
-	vm.add_child(_fp_arm(Vector3(-0.09, -0.05, -0.36), Vector3(deg_to_rad(-32), deg_to_rad(-18), deg_to_rad(14)), skin, sleeve, layer))
+	# NOTE: proper FP arms require a dedicated arms-only glb rigged to the camera.
+	# The soldier.glb we ship has a full body with arms-rifle bone-attached, but its arms rotate
+	# with the standing visual (not the camera pitch), so they don't look right as viewmodel arms.
+	# For now the rifle floats; drop an fp_arms.glb into characters/ and we'll wire it up here.
 	var g := Gradient.new()
 	g.set_color(0, Color(1.0, 0.9, 0.6, 1.0))
 	g.set_color(1, Color(1.0, 0.45, 0.1, 0.0))

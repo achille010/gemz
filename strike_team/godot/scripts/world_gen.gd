@@ -71,13 +71,18 @@ func build(parent: Node3D, mission: Dictionary, r: RandomNumberGenerator, _asset
 	_blocks()
 	_mountain_dressing()
 	_flush_multimeshes()
-	spawn_points = [cell_center(1, 2), cell_center(2, 1)]
+	spawn_points = [_ground_point(cell_center(1, 2)), _ground_point(cell_center(2, 1))]
 	radar_tex = ImageTexture.create_from_image(radar)
 
 
 # ================================================================ grid helpers
 func cell_center(i: int, j: int) -> Vector3:
 	return Vector3(-half + (i + 0.5) * CELL, 0.0, -half + (j + 0.5) * CELL)
+
+
+func _ground_point(p: Vector3) -> Vector3:
+	# Snap a world-space point to the terrain surface so spawns never land inside the mesh.
+	return Vector3(p.x, height_at(p.x, p.z) + 0.6, p.z)
 
 
 func _idx(i: int, j: int) -> int:
@@ -108,8 +113,8 @@ func random_open(avoid: Array, min_d: float) -> Vector3:
 				ok = false
 				break
 		if ok:
-			return p
-	return cell_center(N / 2, N / 2)
+			return _ground_point(p)
+	return _ground_point(cell_center(N / 2, N / 2))
 
 
 func height_at(x: float, z: float) -> float:
