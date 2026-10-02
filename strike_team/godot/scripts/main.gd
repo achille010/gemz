@@ -19,8 +19,10 @@ const REVIVE_TIME := 3.0
 const REVIVE_DIST := 2.4
 const EXTRACT_RADIUS := 6.0
 const KEYS := [
-	[KEY_W, KEY_S, KEY_A, KEY_D, KEY_R, KEY_F, KEY_Q, KEY_E, KEY_C, KEY_SPACE, KEY_V],
-	[KEY_I, KEY_K, KEY_J, KEY_L, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_SHIFT, KEY_ENTER, KEY_PERIOD],
+	# W,  S,  A,  D,  R(pup), F(pdn), Q(l), E(r), C(crouch), SPC(fire), V(aim), SHIFT(sprint), G(nade), H(medkit)
+	[KEY_W, KEY_S, KEY_A, KEY_D, KEY_R, KEY_F, KEY_Q, KEY_E, KEY_C, KEY_SPACE, KEY_V, KEY_SHIFT, KEY_G, KEY_H],
+	# P2: SHIFT already used for sprint on P1, so P2 crouch moves to N; sprint stays "/" ; grenade = ',' ; medkit = ';'
+	[KEY_I, KEY_K, KEY_J, KEY_L, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_N, KEY_ENTER, KEY_PERIOD, KEY_SLASH, KEY_COMMA, KEY_SEMICOLON],
 ]
 
 var mission := {}
@@ -30,6 +32,10 @@ var udp := PacketPeerUDP.new()
 var pad_state := [[0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0]]
 var pad_time := [-10.0, -10.0]
 var crouch_prev := [false, false]
+var nade_prev := [false, false]
+var medkit_prev := [false, false]
+var cheat_god := false
+var cheat_ammo := false
 var kb_look := [Vector2.ZERO, Vector2.ZERO]       # smoothed keyboard look input (0..1 each axis)
 var mouse_delta := Vector2.ZERO                   # solo-mode mouse look accumulator
 var mouse_fire := false
@@ -251,7 +257,8 @@ const RIFLE_YAW := 90.0
 
 func _make_viewmodel(cam: Camera3D, layer: int) -> Node3D:
 	var vm := Node3D.new()
-	vm.position = Vector3(0.2, -0.19, -0.5)
+	vm.position = Vector3(0.26, -0.32, -0.55)
+	vm.rotation_degrees = Vector3(-4, -5, 2)       # tilt the rifle so it reads as held, not floating
 	cam.add_child(vm)
 	var rifle := A.opt("rifle")
 	if rifle != null:
@@ -620,6 +627,57 @@ func make_prop(kind: String) -> Node3D:
 	return root
 
 
+func _make_tank_prop() -> Node3D:
+	# Blocky abandoned tank: hull, turret, barrel. Static cover, solid collision.
+	var root := StaticBody3D.new()
+	root.collision_layer = 1
+	var paint := StandardMaterial3D.new()
+	paint.albedo_color = Color(0.22, 0.26, 0.19)
+	paint.roughness = 0.85
+	paint.metallic = 0.1
+	# hull
+	var hull := MeshInstance3D.new()
+	var hb := BoxMesh.new()
+	hb.size = Vector3(5.0, 1.4, 2.8)
+	hull.mesh = hb
+	hull.material_override = paint
+	hull.position.y = 0.7
+	root.add_child(hull)
+	# turret
+	var tur := MeshInstance3D.new()
+	var tb := BoxMesh.new()
+	tb.size = Vector3(2.4, 0.9, 2.0)
+	tur.mesh = tb
+	tur.material_override = paint
+	tur.position = Vector3(0.3, 1.85, 0)
+	root.add_child(tur)
+	# barrel
+	var bar := MeshInstance3D.new()
+	var cm := CylinderMesh.new()
+	cm.top_radius = 0.1
+	cm.bottom_radius = 0.14
+	cm.height = 3.6
+	bar.mesh = cm
+	bar.material_override = paint
+	bar.rotation_degrees = Vector3(90, 0, 0)
+	bar.position = Vector3(3.1, 1.95, 0)
+	root.add_child(bar)
+	# collision shapes
+	var cs := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(5.0, 1.4, 2.8)
+	cs.shape = box
+	cs.position.y = 0.7
+	root.add_child(cs)
+	var cs2 := CollisionShape3D.new()
+	var box2 := BoxShape3D.new()
+	box2.size = Vector3(2.4, 0.9, 2.0)
+	cs2.shape = box2
+	cs2.position = Vector3(0.3, 1.85, 0)
+	root.add_child(cs2)
+	return root
+
+
 func _part_box(sz: Vector3, c: Color, emit: float) -> MeshInstance3D:
 	var mi := MeshInstance3D.new()
 	var bm := BoxMesh.new()
@@ -660,13 +718,26 @@ func _spawn_bot(pos: Vector3, kind := "soldier") -> Node:
 func _spawn_enemies() -> void:
 	var mods: Array = mission.get("mods", [])
 	var spawn_avoid: Array = gen.spawn_points.duplicate()
-	for i in (6 + difficulty if solo else 10 + difficulty * 2):
-		var kind := "heavy" if randf() < (0.3 if mods.has("heavy") else 0.08) else "soldier"
+	# Count scales harder at diff 8-10: 6+d solo, 10+d*2 co-op base, +50% at diff 10
+	var hard: float = clampf((difficulty - 6.0) / 4.0, 0.0, 1.0)
+	var base_n: int = (6 + difficulty) if solo else (10 + difficulty * 2)
+	var count: int = int(base_n * (1.0 + hard * 0.5))
+	var heavy_rate: float = (0.3 if mods.has("heavy") else 0.08) + hard * 0.15
+	for i in count:
+		var kind := "heavy" if randf() < heavy_rate else "soldier"
 		_spawn_bot(gen.random_open(spawn_avoid, 40.0), kind)
 	for pt in objective.get("points", []):
 		for k in 2 + difficulty / 4:
 			var a := randf() * TAU
 			_spawn_bot(pt["pos"] + Vector3(cos(a), 0, sin(a)) * randf_range(4.0, 9.0), "heavy" if randf() < 0.2 else "soldier")
+	# Hidden tanks: 1-2 abandoned tanks tucked into out-of-the-way corners of the map.
+	# Pure cover for now - functional ones need a proper tank asset.
+	for i in (2 if difficulty >= 5 else 1):
+		var tp: Vector3 = gen.random_open(spawn_avoid, 70.0)
+		var t := _make_tank_prop()
+		t.position = tp
+		t.rotation.y = randf() * TAU
+		world.add_child(t)
 
 
 func spawn_wave(count: int, toward: Vector3) -> void:
@@ -1036,12 +1107,43 @@ func _input(ev: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 
+func _unhandled_key_input(ev: InputEvent) -> void:
+	# Cheats - any mode. F7 god, F8 infinite ammo, F9 restock grenades + medkit, F10 next-objective.
+	if not (ev is InputEventKey) or not (ev as InputEventKey).pressed or (ev as InputEventKey).echo:
+		return
+	match (ev as InputEventKey).keycode:
+		KEY_F7:
+			cheat_god = not cheat_god
+			_flash_banner("CHEAT: GOD MODE " + ("ON" if cheat_god else "OFF"), "", 2.0)
+		KEY_F8:
+			cheat_ammo = not cheat_ammo
+			_flash_banner("CHEAT: INFINITE AMMO " + ("ON" if cheat_ammo else "OFF"), "", 2.0)
+		KEY_F9:
+			for p in players:
+				if p.state == "alive":
+					p.grenades = 9
+					p.has_medkit = true
+					p.reloads_left = 12
+					p.mag = p.MAG_SIZE
+			_flash_banner("CHEAT: FULL RESUPPLY", "", 2.0)
+		KEY_F10:
+			# auto-complete current objective and jump to extraction
+			if objective.get("stage", "") == "main":
+				for pt in objective.get("points", []):
+					pt["done"] = true
+				_to_extract()
+				_flash_banner("CHEAT: OBJECTIVE SKIPPED", "", 2.0)
+
+
 func get_input(i: int) -> Dictionary:
 	var mv := Vector2.ZERO
 	var lk := Vector2.ZERO
 	var crouch := false
 	var fire := false
 	var aim := false
+	var sprint := false
+	var nade := false
+	var medkit_use := false
 	var now := Time.get_ticks_msec() / 1000.0
 	if now - pad_time[i] < 0.6:
 		var p: Array = pad_state[i]
@@ -1061,9 +1163,12 @@ func get_input(i: int) -> Dictionary:
 			mv += l
 		if r.length() > 0.2:
 			lk += r
-		crouch = crouch or Input.is_joy_button_pressed(d, JOY_BUTTON_LEFT_STICK) or Input.is_joy_button_pressed(d, JOY_BUTTON_B)
+		crouch = crouch or Input.is_joy_button_pressed(d, JOY_BUTTON_B)
 		fire = fire or Input.is_joy_button_pressed(d, JOY_BUTTON_RIGHT_STICK) or Input.get_joy_axis(d, JOY_AXIS_TRIGGER_RIGHT) > 0.4
 		aim = aim or Input.get_joy_axis(d, JOY_AXIS_TRIGGER_LEFT) > 0.4 or Input.is_joy_button_pressed(d, JOY_BUTTON_LEFT_SHOULDER)
+		sprint = sprint or Input.is_joy_button_pressed(d, JOY_BUTTON_LEFT_STICK)
+		nade = nade or Input.is_joy_button_pressed(d, JOY_BUTTON_RIGHT_SHOULDER)
+		medkit_use = medkit_use or Input.is_joy_button_pressed(d, JOY_BUTTON_Y)
 	var k: Array = KEYS[i]
 	mv += Vector2(_k(k[3]) - _k(k[2]), _k(k[0]) - _k(k[1]))
 	# keyboard look eases from 0 toward target so turning doesn't snap on at full speed
@@ -1080,6 +1185,9 @@ func get_input(i: int) -> Dictionary:
 	crouch = crouch or Input.is_physical_key_pressed(k[8])
 	fire = fire or Input.is_physical_key_pressed(k[9])
 	aim = aim or Input.is_physical_key_pressed(k[10])
+	sprint = sprint or Input.is_physical_key_pressed(k[11])
+	nade = nade or Input.is_physical_key_pressed(k[12])
+	medkit_use = medkit_use or Input.is_physical_key_pressed(k[13])
 	# solo mouse look: pointer motion drives P1's look as a direct yaw/pitch delta (bypasses dt);
 	# LMB fires, RMB scopes
 	var yaw_delta := 0.0
@@ -1093,9 +1201,14 @@ func get_input(i: int) -> Dictionary:
 		fire = fire or mouse_fire
 		aim = aim or mouse_aim
 	var pressed: bool = crouch and not crouch_prev[i]
+	var nade_edge: bool = nade and not nade_prev[i]
+	var med_edge: bool = medkit_use and not medkit_prev[i]
 	crouch_prev[i] = crouch
+	nade_prev[i] = nade
+	medkit_prev[i] = medkit_use
 	return {"move": mv.limit_length(1.0), "look": lk.limit_length(1.0),
 		"crouch_pressed": pressed, "fire": fire, "aim": aim,
+		"sprint": sprint, "nade_pressed": nade_edge, "medkit_pressed": med_edge,
 		"yaw_delta": yaw_delta, "pitch_delta": pitch_delta}
 
 
@@ -1130,8 +1243,8 @@ func _process(dt: float) -> void:
 		var rel: float = 0.25 if p.reload_t > 0.0 else 0.0
 		# scoped: rifle pulls to centre of screen for a sight picture
 		var kick: float = float(p.kick)
-		var hip := Vector3(0.2, -0.19 - rel + bob, -0.5 + kick * 3.0)
-		var ads := Vector3(0.0, -0.08 + bob, -0.32 + kick * 2.0)
+		var hip := Vector3(0.26, -0.32 - rel + bob, -0.55 + kick * 3.0)
+		var ads := Vector3(0.0, -0.12 + bob, -0.34 + kick * 2.0)
 		vm.position = vm.position.lerp(hip.lerp(ads, at), minf(1.0, dt * 14.0))
 		if scope_overlays.size() > i and scope_overlays[i] != null:
 			scope_overlays[i].modulate.a = at
@@ -1310,6 +1423,49 @@ func spawn_impact(pos: Vector3, blood: bool) -> void:
 	p.position = pos
 	world.add_child(p)
 	fx.append([p, 0.6])
+
+
+func spawn_grenade(pos: Vector3, vel: Vector3, by) -> void:
+	# A simple RigidBody3D grenade - bounces off the world, explodes on a 3 s fuse.
+	var g := RigidBody3D.new()
+	g.position = pos
+	g.linear_velocity = vel
+	g.angular_velocity = Vector3(randf_range(-6, 6), randf_range(-6, 6), randf_range(-6, 6))
+	g.gravity_scale = 1.4
+	g.collision_layer = 0
+	g.collision_mask = 1
+	g.physics_material_override = PhysicsMaterial.new()
+	g.physics_material_override.bounce = 0.25
+	g.physics_material_override.friction = 0.9
+	var cs := CollisionShape3D.new()
+	var sp := SphereShape3D.new()
+	sp.radius = 0.08
+	cs.shape = sp
+	g.add_child(cs)
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.08
+	sm.height = 0.16
+	mi.mesh = sm
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.18, 0.22, 0.14)
+	m.metallic = 0.4
+	m.roughness = 0.6
+	mi.material_override = m
+	g.add_child(mi)
+	# blinking red indicator
+	var l := OmniLight3D.new()
+	l.light_color = Color(1, 0.25, 0.15)
+	l.light_energy = 1.2
+	l.omni_range = 1.2
+	g.add_child(l)
+	world.add_child(g)
+	# fuse: 3 s then detonate wherever it is
+	var cb := func():
+		if is_instance_valid(g):
+			_explode(g.global_position)
+			g.queue_free()
+	get_tree().create_timer(3.0).timeout.connect(cb)
 
 
 func _explode(pos: Vector3) -> void:

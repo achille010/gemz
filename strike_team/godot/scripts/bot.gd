@@ -35,19 +35,26 @@ func setup(m, pos: Vector3, k: String, diff: int) -> void:
 	collision_layer = 4
 	collision_mask = 1 | 2 | 4
 	var mods: Array = main.mission.get("mods", [])
-	accuracy = 0.22 + diff * 0.035 + (0.15 if mods.has("sharpshooters") else 0.0)
-	damage = 8.0 + diff * 0.6
+	# Difficulty 1 is forgiving (base accuracy ~0.26, 9.2 dmg); diff 10 is brutal
+	# (accuracy ~0.80, 20 dmg, HP x2, view_dist x1.4). The curve ramps hard from 7 to 10.
+	var d: float = float(diff)
+	var hard: float = clampf((d - 6.0) / 4.0, 0.0, 1.0)      # 0 at diff<=6, 1 at diff>=10
+	accuracy = 0.22 + d * 0.04 + hard * 0.18 + (0.15 if mods.has("sharpshooters") else 0.0)
+	damage = 8.0 + d * 0.7 + hard * 4.0
+	view_dist = 42.0 + hard * 18.0
 	var color := Color(0.5, 0.56, 0.46)
 	if kind == "heavy":
-		hp = 240.0
+		hp = 240.0 + hard * 180.0
 		speed = 2.3
 		damage *= 1.5
 		color = Color(0.3, 0.32, 0.32)
 	elif kind == "officer":
-		hp = 320.0
+		hp = 320.0 + hard * 240.0
 		speed = 2.8
 		accuracy += 0.1
 		color = Color(1.1, 0.85, 0.35)
+	else:
+		hp = 100.0 + hard * 60.0
 	var sh := CapsuleShape3D.new()
 	sh.radius = 0.35
 	sh.height = 1.8

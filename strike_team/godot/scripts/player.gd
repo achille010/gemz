@@ -5,7 +5,9 @@ extends CharacterBody3D
 const MAG_SIZE := 30
 const START_RELOADS := 12
 const WALK := 5.2
+const SPRINT := 8.4
 const CROUCH_WALK := 2.4
+const START_GRENADES := 3
 const YAW_RATE := 1.9
 const PITCH_RATE := 1.4
 const KB_LOOK_RAMP := 7.0            # keyboard look eases from 0 to full over ~1/ramp seconds
@@ -52,6 +54,10 @@ var reload_prev := 0.0
 var reload_anim_t := 0.0
 var aim_t := 0.0                    # 0 = hip-fire, 1 = fully scoped
 var aiming := false
+var stamina := 1.0                  # 0..1; drains while sprinting, recharges when not
+var sprinting := false
+var grenades := START_GRENADES
+var nade_cook := 0.0                # throw cooldown so one press isn't two throws
 const SCOPE_FOV := 32.0
 const HIP_FOV := 70.0
 
@@ -184,7 +190,15 @@ func _alive(dt: float, inp: Dictionary) -> void:
 	var mv: Vector2 = inp["move"]
 	var b := Basis(Vector3.UP, yaw)
 	var dir := (-b.z * mv.y + b.x * mv.x)
-	var spd: float = (CROUCH_WALK if crouched else WALK) * move_slow
+	# sprint: hold Shift (P1) / "/" (P2) / Left-stick-click. Needs forward motion + stamina + not scoped.
+	var want_sprint: bool = bool(inp.get("sprint", false)) and mv.y > 0.35 and stamina > 0.08 and not crouched and aim_t < 0.1
+	sprinting = want_sprint
+	if sprinting:
+		stamina = maxf(0.0, stamina - dt * 0.33)       # ~3 s of continuous sprint before empty
+	else:
+		stamina = minf(1.0, stamina + dt * 0.22)       # ~4.5 s to full recharge
+	var base_walk: float = CROUCH_WALK if crouched else (SPRINT if sprinting else WALK)
+	var spd: float = base_walk * move_slow
 	velocity.x = lerp(velocity.x, dir.x * spd, min(1.0, dt * 12.0))
 	velocity.z = lerp(velocity.z, dir.z * spd, min(1.0, dt * 12.0))
 	if mv.length() > 0.2 and is_on_floor():
@@ -213,10 +227,25 @@ func _alive(dt: float, inp: Dictionary) -> void:
 			say("OUT OF AMMO - find an ammo crate (white on the map)")
 	elif inp["fire"] and fire_cd <= 0.0:
 		_shoot()
+	# medkit self-use: when alive, consume medkit to top up HP (any time, not just downed)
+	if inp.get("medkit_pressed", false) and has_medkit and hp < 100.0:
+		has_medkit = false
+		hp = 100.0
+		hurt_flash = 0.0
+		regen_delay = 0.0
+		main.play_sfx("pickup", global_position, 0.0)
+		say("MEDKIT USED - full HP")
+	# grenade throw
+	nade_cook = max(0.0, nade_cook - dt)
+	if inp.get("nade_pressed", false) and grenades > 0 and nade_cook <= 0.0:
+		grenades -= 1
+		nade_cook = 1.0
+		_throw_grenade()
 
 
 func _shoot() -> void:
-	mag -= 1
+	if not main.cheat_ammo:
+		mag -= 1
 	fire_cd = 0.1
 	main.stats["shots"] += 1
 	var t := head.global_transform
@@ -246,8 +275,19 @@ func _shoot() -> void:
 	fire_anim_t = 1.0
 
 
+func _throw_grenade() -> void:
+	var t := head.global_transform
+	var from := t.origin + -t.basis.z * 0.5 + t.basis.y * -0.1
+	var vel := -t.basis.z * 18.0 + t.basis.y * 4.0        # ~2 s flight for a 4-5 s fuse arc
+	main.spawn_grenade(from, vel, self)
+	main.play_sfx("step", global_position, -8.0)
+	say("GRENADE OUT")
+
+
 func take_damage(dmg: float, from_pos: Vector3) -> void:
 	if state != "alive" or main.state != "play":
+		return
+	if main.cheat_god:
 		return
 	if crouched:
 		dmg *= 0.8
