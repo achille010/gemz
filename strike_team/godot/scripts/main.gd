@@ -1039,17 +1039,19 @@ func _process(dt: float) -> void:
 			continue
 		var p = players[i]
 		cams[i].global_transform = p.head.global_transform
-		cams[i].fov = lerp(70.0, 32.0, p.aim_t)
+		var at: float = float(p.aim_t)
+		cams[i].fov = lerp(70.0, 32.0, at)
 		var vm: Node3D = viewmodels[i]
 		vm.visible = p.state == "alive"
-		var bob := sin(elapsed * 9.0) * 0.01 * minf(1.0, Vector2(p.velocity.x, p.velocity.z).length() / 4.0) * (1.0 - p.aim_t)
-		var rel := 0.25 if p.reload_t > 0.0 else 0.0
+		var bob: float = sin(elapsed * 9.0) * 0.01 * minf(1.0, Vector2(p.velocity.x, p.velocity.z).length() / 4.0) * (1.0 - at)
+		var rel: float = 0.25 if p.reload_t > 0.0 else 0.0
 		# scoped: rifle pulls to centre of screen for a sight picture
-		var hip := Vector3(0.2, -0.19 - rel + bob, -0.5 + p.kick * 3.0)
-		var ads := Vector3(0.0, -0.08 + bob, -0.32 + p.kick * 2.0)
-		vm.position = vm.position.lerp(hip.lerp(ads, p.aim_t), minf(1.0, dt * 14.0))
+		var kick: float = float(p.kick)
+		var hip := Vector3(0.2, -0.19 - rel + bob, -0.5 + kick * 3.0)
+		var ads := Vector3(0.0, -0.08 + bob, -0.32 + kick * 2.0)
+		vm.position = vm.position.lerp(hip.lerp(ads, at), minf(1.0, dt * 14.0))
 		if scope_overlays.size() > i and scope_overlays[i] != null:
-			scope_overlays[i].modulate.a = p.aim_t
+			scope_overlays[i].modulate.a = at
 		var firing: bool = p.fire_cd > 0.06 and p.mag > 0 and p.reload_t <= 0.0 and p.state == "alive"
 		vm.get_child(vm.get_child_count() - 1).light_energy = 3.0 if firing else 0.0
 		var spr: Node3D = vm.get_child(vm.get_child_count() - 2)
