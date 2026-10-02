@@ -6,8 +6,9 @@ const MAG_SIZE := 30
 const START_RELOADS := 12
 const WALK := 5.2
 const CROUCH_WALK := 2.4
-const YAW_RATE := 2.8
-const PITCH_RATE := 1.9
+const YAW_RATE := 1.9
+const PITCH_RATE := 1.4
+const KB_LOOK_RAMP := 7.0            # keyboard look eases from 0 to full over ~1/ramp seconds
 const PITCH_LIMIT := 55.0           # degrees - keeps the view from getting lost up / down
 
 var main
@@ -46,6 +47,9 @@ var kills := 0
 var anim_t := 0.0
 var hitmark_kill := false
 var hit_dirs := []
+var fire_anim_t := 0.0
+var reload_prev := 0.0
+var reload_anim_t := 0.0
 
 
 func setup(m, i: int, pos: Vector3, look_yaw: float, color: Color) -> void:
@@ -136,9 +140,22 @@ func _physics_process(dt: float) -> void:
 	head.position.y = lerp(head.position.y, target_h, dt * 10.0)
 	rotation.y = yaw
 	head.rotation.x = pitch + kick
-	visual.rotation.x = lerp(visual.rotation.x, (-1.35 if state == "down" else 0.0), dt * 6.0)
+	# procedural animation: aim pitch lean + fire recoil + reload sway
+	fire_anim_t = max(0.0, fire_anim_t - dt * 4.0)
+	if reload_t > 0.0:
+		reload_anim_t = min(1.0, reload_anim_t + dt * 4.0)
+	else:
+		reload_anim_t = max(0.0, reload_anim_t - dt * 4.0)
+	var aim_lean: float = clamp(pitch, -0.4, 0.4) * 0.35 if state == "alive" else 0.0
+	var recoil_lean: float = -fire_anim_t * 0.18
+	var reload_lean: float = reload_anim_t * 0.25
+	var base_x := -1.35 if state == "down" else (aim_lean + recoil_lean + reload_lean)
+	visual.rotation.x = lerp(visual.rotation.x, base_x, dt * 12.0)
+	var reload_z := sin(main.elapsed * 9.0) * 0.08 * reload_anim_t
+	visual.rotation.z = lerp(visual.rotation.z, reload_z, dt * 10.0)
 	visual.scale.y = lerp(visual.scale.y, (0.72 if crouched and state == "alive" else 1.0), dt * 10.0)
-	main.animate(visual, Vector2(velocity.x, velocity.z).length() if state == "alive" else 0.0)
+	var speed := Vector2(velocity.x, velocity.z).length() if state == "alive" else 0.0
+	main.animate(visual, speed, {"crouched": crouched, "firing": fire_anim_t > 0.3, "reloading": reload_t > 0.0})
 
 
 func _alive(dt: float, inp: Dictionary) -> void:
@@ -209,6 +226,7 @@ func _shoot() -> void:
 	main.alert_bots(global_position, 35.0, self)
 	recoil = min(recoil + 0.005, 0.045)
 	kick = 0.018
+	fire_anim_t = 1.0
 
 
 func take_damage(dmg: float, from_pos: Vector3) -> void:

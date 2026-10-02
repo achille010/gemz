@@ -30,6 +30,7 @@ var udp := PacketPeerUDP.new()
 var pad_state := [[0, 0, 0, 0, 0, 0, 0], [0, 0, 0, 0, 0, 0, 0]]
 var pad_time := [-10.0, -10.0]
 var crouch_prev := [false, false]
+var kb_look := [Vector2.ZERO, Vector2.ZERO]       # smoothed keyboard look input (0..1 each axis)
 var rng := RandomNumberGenerator.new()
 var gen
 var world: Node3D
@@ -126,9 +127,13 @@ func _build_views() -> void:
 		holder.add_child(svc)
 		var vp := SubViewport.new()
 		vp.world_3d = w3d
-		vp.msaa_3d = Viewport.MSAA_2X
+		vp.msaa_3d = Viewport.MSAA_DISABLED
 		vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA
 		vp.audio_listener_enable_3d = false
+		# in solo mode the second viewport is hidden and never rendered: saves ~half the GPU cost
+		if solo and i == 1:
+			vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+			vp.disable_3d = true
 		svc.add_child(vp)
 		if i == 0:
 			world = Node3D.new()
@@ -136,7 +141,7 @@ func _build_views() -> void:
 		var cam := Camera3D.new()
 		cam.fov = 70.0
 		cam.near = 0.05
-		cam.far = 600.0
+		cam.far = 220.0
 		cam.cull_mask = 0xFFFFF & ~(2 if i == 0 else 4) & ~(32 if i == 0 else 16)
 		vp.add_child(cam)
 		cam.current = true
@@ -424,7 +429,7 @@ func make_hostage() -> Node3D:
 	return root
 
 
-func animate(visual: Node3D, speed: float) -> void:
+func animate(visual: Node3D, speed: float, flags: Dictionary = {}) -> void:
 	var ap = visual.get_meta("ap", null)
 	if ap == null:
 		return
@@ -434,8 +439,14 @@ func animate(visual: Node3D, speed: float) -> void:
 	elif speed > 0.4:
 		want = "Walk"
 	if ap.current_animation != want:
-		ap.play(want, 0.25)
-	ap.speed_scale = 1.0 if want == "Idle" else clampf(speed / (5.5 if want == "Run" else 1.6), 0.6, 1.5)
+		ap.play(want, 0.2)
+	# subtle speed modulation on top: crouch slows the walk cycle, firing/reload speeds it slightly
+	var base := 1.0 if want == "Idle" else clampf(speed / (5.5 if want == "Run" else 1.6), 0.6, 1.5)
+	if flags.get("crouched", false) and want != "Idle":
+		base *= 0.6
+	if flags.get("firing", false):
+		base *= 1.15
+	ap.speed_scale = base
 
 
 func _block_soldier(color: Color, layer: int, enemy := false) -> Node3D:
@@ -555,7 +566,7 @@ func _spawn_bot(pos: Vector3, kind := "soldier") -> Node:
 func _spawn_enemies() -> void:
 	var mods: Array = mission.get("mods", [])
 	var spawn_avoid: Array = gen.spawn_points.duplicate()
-	for i in (8 + difficulty if solo else 12 + difficulty * 2):
+	for i in (6 + difficulty if solo else 10 + difficulty * 2):
 		var kind := "heavy" if randf() < (0.3 if mods.has("heavy") else 0.08) else "soldier"
 		_spawn_bot(gen.random_open(spawn_avoid, 40.0), kind)
 	for pt in objective.get("points", []):
@@ -936,7 +947,17 @@ func get_input(i: int) -> Dictionary:
 		fire = fire or Input.is_joy_button_pressed(d, JOY_BUTTON_RIGHT_STICK) or Input.get_joy_axis(d, JOY_AXIS_TRIGGER_RIGHT) > 0.4
 	var k: Array = KEYS[i]
 	mv += Vector2(_k(k[3]) - _k(k[2]), _k(k[0]) - _k(k[1]))
-	lk += Vector2(_k(k[7]) - _k(k[6]), _k(k[4]) - _k(k[5]))
+	# keyboard look eases from 0 toward target so turning doesn't snap on at full speed
+	var kb_target := Vector2(_k(k[7]) - _k(k[6]), _k(k[4]) - _k(k[5]))
+	var dt := get_process_delta_time()
+	var rate := minf(1.0, dt * 7.0)
+	kb_look[i].x = lerp(kb_look[i].x, kb_target.x, rate)
+	kb_look[i].y = lerp(kb_look[i].y, kb_target.y, rate)
+	if absf(kb_look[i].x) < 0.01 and kb_target.x == 0.0:
+		kb_look[i].x = 0.0
+	if absf(kb_look[i].y) < 0.01 and kb_target.y == 0.0:
+		kb_look[i].y = 0.0
+	lk += kb_look[i]
 	crouch = crouch or Input.is_physical_key_pressed(k[8])
 	fire = fire or Input.is_physical_key_pressed(k[9])
 	var pressed: bool = crouch and not crouch_prev[i]
@@ -963,6 +984,8 @@ func _process(dt: float) -> void:
 	if Input.is_physical_key_pressed(KEY_ESCAPE) and state == "play":
 		_finish(false, "Mission aborted")
 	for i in 2:
+		if solo and i == 1:
+			continue
 		var p = players[i]
 		cams[i].global_transform = p.head.global_transform
 		var vm: Node3D = viewmodels[i]
