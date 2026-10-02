@@ -1323,9 +1323,9 @@ func _update_pickups(dt: float) -> void:
 			if pk["kind"] == "ammo" and p.reloads_left < 12:
 				p.reloads_left = mini(12, p.reloads_left + 4)
 				p.say("+4 MAGAZINES")
-			elif pk["kind"] == "medkit" and not p.has_medkit:
-				p.has_medkit = true
-				p.say("MEDKIT PICKED UP")
+			elif pk["kind"] == "medkit" and p.medkits < p.MAX_MEDKITS:
+				p.medkits += 1
+				p.say("+1 MEDKIT (now %d/%d) - press H to heal 50 HP" % [p.medkits, p.MAX_MEDKITS])
 			else:
 				continue
 			pk["node"].visible = false
@@ -1337,11 +1337,11 @@ func _update_pickups(dt: float) -> void:
 func _update_revives(dt: float) -> void:
 	if solo:
 		var me = players[0]
-		if me.state == "down" and me.has_medkit:
+		if me.state == "down" and me.medkits > 0:
 			me.revive_t += dt
 			if me.revive_t >= REVIVE_TIME + 1.0:
 				me.revive_t = 0.0
-				me.has_medkit = false
+				me.medkits -= 1
 				me.revive()
 				stats["revives"] += 1
 		else:
@@ -1349,11 +1349,11 @@ func _update_revives(dt: float) -> void:
 		return
 	for p in players:
 		var o = players[1 - p.idx]
-		if p.state == "alive" and p.has_medkit and o.state == "down" and _flat_dist(p.global_position, o.global_position) < REVIVE_DIST:
+		if p.state == "alive" and p.medkits > 0 and o.state == "down" and _flat_dist(p.global_position, o.global_position) < REVIVE_DIST:
 			p.revive_t += dt
 			if p.revive_t >= REVIVE_TIME:
 				p.revive_t = 0.0
-				p.has_medkit = false
+				p.medkits -= 1
 				o.revive()
 				stats["revives"] += 1
 		else:

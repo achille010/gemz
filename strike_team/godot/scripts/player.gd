@@ -27,7 +27,16 @@ var mag := MAG_SIZE
 var reloads_left := START_RELOADS
 var reload_t := 0.0
 var fire_cd := 0.0
-var has_medkit := false
+var medkits := 1                    # start the mission with one medkit; stack to 5 via pickups
+const MAX_MEDKITS := 5
+# legacy getter so hud.gd / main.gd code that reads p.has_medkit still works
+var has_medkit: bool:
+	get: return medkits > 0
+	set(v):
+		if v and medkits == 0:
+			medkits = 1
+		elif not v and medkits > 0:
+			medkits -= 1
 var revive_t := 0.0
 var spawn_pos := Vector3.ZERO
 var spawn_yaw := 0.0
@@ -227,14 +236,22 @@ func _alive(dt: float, inp: Dictionary) -> void:
 			say("OUT OF AMMO - find an ammo crate (white on the map)")
 	elif inp["fire"] and fire_cd <= 0.0:
 		_shoot()
-	# medkit self-use: when alive, consume medkit to top up HP (any time, not just downed)
-	if inp.get("medkit_pressed", false) and has_medkit and hp < 100.0:
-		has_medkit = false
-		hp = 100.0
-		hurt_flash = 0.0
-		regen_delay = 0.0
-		main.play_sfx("pickup", global_position, 0.0)
-		say("MEDKIT USED - full HP")
+	# medkit self-use: press any time to heal 50 HP (consumes 1 kit from stack of up to 5).
+	# press is rejected only if the stack is empty or HP is already full.
+	if inp.get("medkit_pressed", false):
+		if medkits <= 0:
+			main.play_sfx("empty", global_position, -8.0)
+			say("NO MEDKITS - find pink crates (white on the map)")
+		elif hp >= 100.0:
+			say("HP already full - save your medkit (%d left)" % medkits)
+		else:
+			medkits -= 1
+			hp = minf(100.0, hp + 50.0)
+			hurt_flash = 0.0
+			regen_delay = 0.0
+			main.play_sfx("pickup", global_position, 0.0)
+			var hp_text: String = ("full HP" if hp >= 100.0 else ("+50 HP (now %d)" % int(hp)))
+			say("MEDKIT USED - %s - %d left" % [hp_text, medkits])
 	# grenade throw
 	nade_cook = max(0.0, nade_cook - dt)
 	if inp.get("nade_pressed", false) and grenades > 0 and nade_cook <= 0.0:
