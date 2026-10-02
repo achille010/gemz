@@ -307,6 +307,7 @@ class App:
                 self.start_mission()
             elif m.get("campaign_no") is None:
                 self.mission = missions.generate(solo=m.get("solo", False))
+                self.sel = 0           # snap back to START so the next OK plays the mission
             else:
                 self.screen_name, self.sel = "menu", 0
             return
