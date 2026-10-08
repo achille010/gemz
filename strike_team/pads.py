@@ -11,6 +11,23 @@ import time
 
 NUM = re.compile(r"(?<![A-Za-z0-9_.])-?\d+(?:\.\d+)?")
 
+STRICT = re.compile(r"^J,(\d{1,4}),(\d{1,4}),(\d{1,4}),(\d{1,4}),([01]),([01])(?:,(\d{1,3}))?$")
+
+
+def parse_pad_line(line):
+    """Strict parse of 'J,lx,ly,rx,ry,lc,rc[,sum]'. Bluetooth drops / merges bytes now and then;
+    a damaged line must be thrown away, not read as a wild stick position. With the checksum
+    (sum of the 6 values % 256, sent by the current sketch) damage is caught reliably."""
+    m = STRICT.match(line.strip())
+    if not m:
+        return None
+    v = [int(x) for x in m.groups()[:6]]
+    if any(a > 1023 for a in v[:4]):
+        return None
+    if m.group(7) is not None and int(m.group(7)) != sum(v) % 256:
+        return None
+    return [float(x) for x in v]
+
 
 class PortReader:
     """Background reader for one COM port. Calibrates the stick centres from the first samples."""
@@ -21,6 +38,7 @@ class PortReader:
         self.status = "opening..."
         self.last_ok = 0.0
         self.lines = 0
+        self.bad = 0
         self.vals = None
         self.center = None
         self.idle = None
@@ -40,9 +58,16 @@ class PortReader:
         return time.time() - self.last_ok < 1.0 and self.center is not None
 
     def feed(self, line):
-        nums = [float(n) for n in NUM.findall(line)]
-        if len(nums) < 3:
-            return False
+        line = line.strip()
+        if line.startswith("J"):
+            nums = parse_pad_line(line)       # our sketch: strict, checksummed
+            if nums is None:
+                self.bad += 1
+                return False
+        else:
+            nums = [float(n) for n in NUM.findall(line)]   # other pads (generic numbers)
+            if len(nums) < 3:
+                return False
         with self.lock:
             self.raw = line.strip()
             if self.center is None or len(nums) != len(self.center) + len(self.idle):
