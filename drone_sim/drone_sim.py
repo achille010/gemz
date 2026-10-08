@@ -81,10 +81,59 @@ CONFIG = {
                1: {"tap": "stabilize", "double": "pause", "hold": "precision"}},    # right click
     # one-stick sketches: stick up/down = throttle, left/right = yaw; its click:
     "single_click": {"tap": "stabilize", "double": "camera", "hold": "forward"},
+    # LEFT-ONLY pad (right stick broken / not fitted): left stick up/down = fly forward / back,
+    # left/right = turn; HOLD right click = climb, HOLD left click = descend; both = pause.
+    # Altitude holds by itself and the drone brakes when the stick is centred.
+    "left_only": True,
     "hold_time": 0.35,
     "double_time": 0.28,
 }
 C = CONFIG
+
+# ---------------------------------------------------------------------
+#  config.json: the dict above is the DEFAULTS. Anything in config.json next to this file
+#  wins, so you can retune the game without editing the code. Missing keys are written back
+#  on the first run, and nested dicts (gamepad, arduino, clicks...) merge key by key.
+# ---------------------------------------------------------------------
+CFG_PATH = os.path.join(HERE, "config.json")
+
+
+def _merge(base, over):
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def load_config(path=None, write_back=True):
+    """Merge config.json over CONFIG, in place. Tuples stay tuples so the renderer is happy."""
+    path = path or CFG_PATH
+    try:
+        with open(path) as f:
+            user = json.load(f)
+    except FileNotFoundError:
+        user = {}
+    except Exception as e:
+        print("config.json ignored (%s)" % e)
+        user = {}
+    # JSON has no tuples and no int keys: put both back
+    for k in ("window_size", "sky_res"):
+        if isinstance(user.get(k), list):
+            user[k] = tuple(user[k])
+    if isinstance(user.get("clicks"), dict):
+        user["clicks"] = {int(i): v for i, v in user["clicks"].items()}
+    _merge(CONFIG, user)
+    if write_back:
+        try:
+            dump = _merge(dict(user), CONFIG)      # keep launcher.py's keys (p1, p2, map...)
+            dump["clicks"] = {str(i): v for i, v in CONFIG["clicks"].items()}
+            with open(path, "w") as f:
+                json.dump(dump, f, indent=2)
+        except Exception:
+            pass
+    return CONFIG
 
 G = 15.0                    # gravity (world units / s^2)
 THROTTLE_RANGE = G * 1.15   # extra thrust above/below hover available from stick
@@ -108,6 +157,20 @@ FOG = np.array([188, 204, 222], np.float32)
 SUN_COL = np.array([255, 236, 200], np.float32)
 MOUNT_FAR = np.array([156, 172, 196], np.float32)
 MOUNT_NEAR = np.array([124, 144, 164], np.float32)
+
+
+def arg_value(flag, default=None):
+    """Value after a command line flag, e.g. --mission run/mission.json."""
+    if flag in sys.argv:
+        i = sys.argv.index(flag) + 1
+        if i < len(sys.argv):
+            return sys.argv[i]
+    return default
+
+
+def m_heavy(game):
+    """True when the running mission flies a heavy airframe (a generator modifier)."""
+    return bool(MISSIONS[game.mission_i].get("heavy"))
 
 
 def clampv(v, a, b):
@@ -442,6 +505,93 @@ class SerialPad:
             time.sleep(1.0)
 
 
+class UdpPad:
+    """A pad fed by launcher.py over UDP instead of by a serial cable.
+
+    The launcher owns the two Arduino pads (see pads.py) and streams both of them here ~60
+    times a second as   {"p": [[lx, ly, rx, ry, lclick, rclick, ok], [...]]}   with up and
+    right positive. Pad 1 flies the drone; pad 2 is the co-pilot, whose clicks are merged
+    into pad 1's so they work the camera, stabilize and pause.
+
+    It deliberately duck-types SerialPad, so the rest of the game reads it without knowing
+    which one it got. Axes arrive already deadzoned and oriented, so axis() passes them on.
+    """
+
+    def __init__(self, port=47800, copilot=True):
+        self.lock = threading.Lock()
+        self.port = port
+        self.copilot = copilot
+        self.connected = False
+        self.status = "waiting for the launcher on UDP %d" % port
+        self.last_line = ""
+        self.vals = [[0.0] * 7, [0.0] * 7]
+        self.last_t = 0.0
+        self.center = [0.0] * 4          # only here so n_axes / button() line up with SerialPad
+        self.idle = [0, 0]
+        self.full = 1.0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.bind(("127.0.0.1", self.port))
+        except OSError as e:
+            self.status = "UDP %d busy (%s) - is another copy running?" % (self.port, e)
+            return
+        s.settimeout(0.5)
+        while True:
+            try:
+                data, _ = s.recvfrom(4096)
+                pkt = json.loads(data.decode("ascii", "ignore"))
+                pads = pkt.get("p") or []
+                with self.lock:
+                    for i in range(min(2, len(pads))):
+                        self.vals[i] = (list(pads[i]) + [0.0] * 7)[:7]
+                    self.last_t = time.time()
+                    self.last_line = str(pads[0][:6]) if pads else ""
+                if not self.connected:
+                    self.connected = True
+                    self.status = "launcher connected"
+            except socket.timeout:
+                if self.connected and time.time() - self.last_t > 1.5:
+                    self.connected = False
+                    self.status = "launcher stopped sending - waiting..."
+            except Exception:
+                pass
+
+    @property
+    def ready(self):
+        with self.lock:
+            return self.connected and time.time() - self.last_t < 1.5 and bool(self.vals[0][6])
+
+    @property
+    def n_axes(self):
+        return 4
+
+    def recalibrate(self):
+        pass                             # the launcher calibrates the real sticks
+
+    def axis(self, i):
+        with self.lock:
+            return float(self.vals[0][i]) if 0 <= i < 4 else 0.0
+
+    def button(self, i):
+        with self.lock:
+            if not 0 <= i < 2:
+                return False
+            mine = bool(self.vals[0][4 + i])
+            mate = bool(self.vals[1][4 + i]) and bool(self.vals[1][6]) and self.copilot
+            return mine or mate
+
+    def num_buttons(self):
+        return 2
+
+    def copilot_live(self):
+        with self.lock:
+            return bool(self.vals[1][6]) and time.time() - self.last_t < 1.5
+
+
 # =====================================================================
 #  World: textures, buildings, trees, checkpoints, missions
 # =====================================================================
@@ -596,6 +746,81 @@ def build_precision_landing(rng):
     return [cp((26.0, 0.0, 60.0), 4.5, "land", hold=1.4, label="LANDING PAD")]
 
 
+def build_generated(m, rng):
+    """Lay out a course from a missions.py mission dict (see launcher.py).
+
+    Everything the briefing promised comes from here: the checkpoint count and radius, the
+    shape of the course and the hold time. Wind, battery and the clock ride on the MISSIONS
+    entry that wraps this builder.
+    """
+    p = m["params"]
+    n, r, hold = int(p["gates"]), float(p["gate_r"]), float(p["hold"])
+    course = m["course"]
+    pts = []
+    if course in ("gate_rush", "grand_tour"):
+        x, z, y = 0.0, 20.0, 12.0
+        ang = 0.0
+        spread = 1.6 if course == "gate_rush" else 2.1      # the tour wanders much wider
+        for i in range(n):
+            ang += (rng.random() - 0.5) * spread
+            step = (22 if course == "gate_rush" else 30) + rng.random() * 12
+            x += math.sin(ang) * step
+            z += math.cos(ang) * step
+            y = clampv(y + (rng.random() - 0.5) * 16, 6, 70)
+            pts.append(cp((x, y, z), r, "gate", label="GATE %d" % (i + 1)))
+        if p.get("tour_landing"):
+            last = pts[-1]["pos"] if pts else np.array([0.0, 0.0, 20.0])
+            pts.append(cp((last[0] + 18, 0.0, last[2] + 18), max(4.0, r), "land",
+                          hold=1.4, label="LANDING PAD"))
+    elif course == "slalom":
+        z, side = 18.0, 1
+        for i in range(n):
+            z += 12 + rng.random() * 3
+            x = side * (8 + rng.random() * 3) + 40
+            side *= -1
+            pts.append(cp((x, 4 + rng.random() * 3, z), r, "pole", label="POLE %d" % (i + 1)))
+    elif course == "altitude":
+        y = 16.0
+        for i in range(n):
+            y += 11 + rng.random() * 10
+            pts.append(cp((rng.uniform(-14, 14), y, 20.0 + rng.uniform(-10, 10)), r,
+                          "altitude", hold=hold, label="%.0f m" % y))
+    elif course == "landing":
+        a = rng.uniform(0, math.tau)
+        d = 60 + rng.random() * 70                          # a real crossing, not a hop
+        pts.append(cp((math.sin(a) * d, 0.0, 20 + math.cos(a) * d), r, "land",
+                      hold=hold, label="LANDING PAD"))
+    return pts
+
+
+def mission_from_file(path):
+    """Turn a launcher mission.json into a MISSIONS entry the game can load."""
+    with open(path) as f:
+        m = json.load(f)
+    p = m["params"]
+    colors = {"gate_rush": (0.10, 0.95, 1.00), "slalom": (1.00, 0.75, 0.10),
+              "altitude": (0.75, 0.50, 1.00), "landing": (0.20, 1.00, 0.45),
+              "delivery": (1.00, 0.45, 0.25), "grand_tour": (1.00, 0.30, 0.55)}
+    entry = {
+        "id": m["code"],
+        "name": m["name"].upper(),
+        "color": colors.get(m["course"], (1.0, 1.0, 1.0)),
+        "time_limit": int(m["time_limit"]),
+        "desc": m["brief"],
+        "builder": lambda rng, _m=m: build_generated(_m, rng),
+        "wind": float(p["wind"]),
+        "gust_scale": float(p["gust"]),
+        "drain": float(p["drain"]),
+        "recharge": int(p["recharge"]),
+        "battery": float(p["battery"]),
+        "heavy": bool(p.get("heavy")),
+        "generated": m,
+    }
+    if m["course"] == "delivery":
+        entry["delivery"] = True
+    return entry
+
+
 # wind: m/s of breeze (gusts on top) - drain: battery % per second at hover - recharge: % per checkpoint
 MISSIONS = [
     {"id": "free_flight", "name": "FREE FLIGHT", "color": (1.00, 1.00, 1.00), "time_limit": 0,
@@ -684,6 +909,10 @@ class Game:
         self.RW, self.RH = self.screen.get_size()
         self.tanx = math.tan(math.radians(C["fov_degrees"]) / 2)
         self.F = (self.RW / 2) / self.tanx
+        self.mission_path = arg_value("--mission")
+        self.result_path = arg_value("--result")
+        self.udp_port = int(arg_value("--pad-udp") or 0)
+        self.result_written = False
         self.sfx = Sfx(C["sound"])
         self.f_big = pygame.font.SysFont("bahnschrift,segoe ui,arial", 64, bold=True)
         self.f_med = pygame.font.SysFont("bahnschrift,segoe ui,arial", 30, bold=True)
@@ -712,7 +941,11 @@ class Game:
             self._open_pad(0)
         if "--serial" in sys.argv:
             C["arduino"]["port"] = sys.argv[sys.argv.index("--serial") + 1]
-        self.ser = SerialPad(C["arduino"]) if C["arduino"]["enabled"] else None
+        # launcher.py owns the pads and streams them over UDP; on our own we read the cable
+        if self.udp_port:
+            self.ser = UdpPad(self.udp_port, copilot="--no-copilot" not in sys.argv)
+        else:
+            self.ser = SerialPad(C["arduino"]) if C["arduino"]["enabled"] else None
         self.ser_seen = False
         self.clicks, self.holding = {}, {}
         self.click_prev = [False, False]
@@ -727,6 +960,26 @@ class Game:
         self.warn_t = 0.0
         self.warning = ""
         self.load_mission(0)
+        mid = arg_value("--mission-id")
+        if mid:
+            ids = [m["id"] for m in MISSIONS]
+            if mid in ids:
+                self.load_mission(ids.index(mid))
+                self.state = "briefing"
+            else:
+                print("unknown mission id %r - expected one of %s" % (mid, ", ".join(ids)))
+                self.write_result(False, "unknown mission %s" % mid)
+                raise SystemExit(1)
+        # a mission handed to us by the launcher: build it and open its briefing straight away
+        if self.mission_path:
+            try:
+                MISSIONS.append(mission_from_file(self.mission_path))
+                self.load_mission(len(MISSIONS) - 1)
+                self.state = "briefing"
+            except Exception as e:
+                print("could not load %s: %s" % (self.mission_path, e))
+                self.write_result(False, "mission file unreadable")
+                raise SystemExit(1)
 
     def set_sky_res(self, res):
         self.GW, self.GH = int(res[0]), int(res[1])
@@ -825,6 +1078,9 @@ class Game:
     def one_stick(self):
         return bool(self.ser and self.ser.ready and self.ser.n_axes == 2 and not self.pad)
 
+    def left_only(self):
+        return bool(C.get("left_only")) and bool(self.ser and self.ser.ready)
+
     def held(self, action):
         return action in self.holding.values()
 
@@ -849,6 +1105,8 @@ class Game:
         elif not self.combo_armed:
             if not any(cur):
                 self.combo_armed = True
+        elif self.left_only() and self.state in ("play", "countdown"):
+            pass                  # clicks are climb / descend while flying (see get_controls)
         else:
             clicks = {1: C["single_click"]} if self.one_stick() else C["clicks"]
             for i, g in clicks.items():
@@ -952,7 +1210,22 @@ class Game:
                 pit -= self.mouse_stick[1]
             b = pygame.mouse.get_pressed(3)
             thr += b[0] - b[2]
-        if self.one_stick():
+        if self.left_only():
+            fwd, turn = -self.stick("ly"), self.stick("lx")
+            cl = self.click_states()
+            pit += fwd
+            yaw += turn
+            rol += turn * max(0.0, fwd) * 0.35       # bank into turns while flying forward
+            climb = float(cl[1]) - float(cl[0])    # right click climbs, left click descends
+            d = getattr(self, "drone", None)
+            if climb or d is None:
+                thr += climb
+                self.alt_target = None
+            else:                                  # autopilot: keep the height you let go at
+                if getattr(self, "alt_target", None) is None:
+                    self.alt_target = float(d.pos[1])
+                thr += clampv((self.alt_target - d.pos[1]) * 0.8 - d.vel[1] * 0.6, -1, 1)
+        elif self.one_stick():
             thr -= self.stick("ly")
             yaw += self.stick("lx")
             if self.held("forward"):
@@ -1038,7 +1311,7 @@ class Game:
         self.cam_yaw = self.drone.yaw
         self.new_best = False
         self.stars = 0
-        self.battery = 100.0
+        self.battery = float(MISSIONS[self.mission_i].get("battery", 100.0))
         self.bat_warn_t = 0.0
         self.bat_empty = False
         self.carrying = False
@@ -1147,7 +1420,37 @@ class Game:
         self.ready_run()
         self.state = "title"
 
+    def write_result(self, win, reason):
+        """Leave the outcome where launcher.py can find it. Only ever written once."""
+        if not self.result_path or self.result_written:
+            return
+        self.result_written = True
+        m = MISSIONS[self.mission_i] if 0 <= self.mission_i < len(MISSIONS) else {}
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.result_path)), exist_ok=True)
+            with open(self.result_path, "w") as f:
+                json.dump({
+                    "win": bool(win),
+                    "reason": reason,
+                    "mission": m.get("id", ""),
+                    "stars": int(getattr(self, "stars", 0) or 0),
+                    "score": int(getattr(self, "score", 0) or 0),
+                    "time": round(float(getattr(self, "elapsed", 0.0)), 1),
+                    "time_left": round(float(getattr(self, "time_left", 0) or 0), 1),
+                    "battery": round(float(getattr(self, "battery", 0.0)), 1),
+                    "checkpoints": int(getattr(self, "cp_i", 0)),
+                    "total_checkpoints": len(getattr(self, "checkpoints", []) or []),
+                    "clips": int(getattr(self, "clips", 0)),
+                }, f, indent=2)
+        except Exception as e:
+            print("could not write result (%s)" % e)
+
     def quit(self):
+        # closing the window mid-run counts as an abort, so the launcher never hangs waiting
+        if not self.result_written:
+            r = getattr(self, "result", None)
+            self.write_result(r == "win", {"win": "Mission complete", "crash": "Crashed",
+                                           "timeout": "Out of time"}.get(r, "Closed before the end"))
         pygame.quit()
         sys.exit()
 
@@ -1228,7 +1531,7 @@ class Game:
             d.landed = False
             if self.bat_empty:
                 thr = min(thr, -0.75)
-            weight = 3.0 if self.carrying else 0.0
+            weight = (3.0 if self.carrying else 0.0) + (1.5 if m_heavy(self) else 0.0)
             d.update(dt, thr, yaw, pit, rol, tilt, trange, yrate, self.wind, weight)
         self.elapsed += dt
         m = MISSIONS[self.mission_i]
@@ -1315,7 +1618,8 @@ class Game:
             return
         T = self.elapsed
         self.wind_dir += dt * 0.05 * math.sin(T * 0.13)
-        gust = max(0.0, math.sin(T * 0.45) * math.sin(T * 0.23 + 1.7)) * 1.6
+        gust = (max(0.0, math.sin(T * 0.45) * math.sin(T * 0.23 + 1.7)) * 1.6
+                * MISSIONS[self.mission_i].get("gust_scale", 1.0))
         strength = base * (0.55 + 0.15 * math.sin(T * 1.3) + gust)
         alt_k = 0.6 + 0.4 * clampv(self.drone.pos[1] / 40, 0, 1.5)     # windier higher up
         w = np.array([math.sin(self.wind_dir), 0.0, math.cos(self.wind_dir)]) * strength * alt_k * 0.45
@@ -1362,9 +1666,14 @@ class Game:
         m = MISSIONS[self.mission_i]
         mid = m["id"]
         if result != "win" or m["time_limit"] <= 0:
+            self.write_result(result == "win",
+                              {"crash": "Crashed", "timeout": "Out of time"}.get(result, "Mission over"))
             return
         frac = self.time_left / m["time_limit"]
         self.stars = 1 + (frac >= 0.2 and self.clips == 0) + (frac >= 0.4 and self.clips == 0 and self.battery >= 25)
+        self.write_result(True, "Mission complete")
+        if m.get("generated"):
+            return          # launcher ops are one-offs: their codes don't belong in highscore.json
         old = self.hi.get(mid, {})
         rec = dict(old)
         rec["stars"] = max(old.get("stars", 0), self.stars)
@@ -2252,7 +2561,9 @@ class Game:
         self.txt(self.f_sm, m["desc"], (230, 235, 245), (W_ // 2, 126), "midtop")
         lines = [
             ("PAD / ARDUINO", ""),
-            ("Left stick", "up/down = climb / descend      left/right = turn (yaw)"),
+            *(([("Left stick", "up = fly forward   down = back   left/right = turn"),
+                ("Right click", "HOLD = climb"), ("Left click", "HOLD = descend")])
+              if self.left_only() else [("Left stick", "up/down = climb / descend      left/right = turn (yaw)")]),
             ("Right stick", "up/down = fly forward / back   left/right = slide sideways"),
             ("Left click", "tap = camera   double = restart   hold = TURBO"),
             ("Right click", "tap = stabilize   double = pause   hold = PRECISION"),
@@ -2387,6 +2698,7 @@ def joytest():
 
 
 if __name__ == "__main__":
+    load_config(arg_value("--config"))
     if "--joytest" in sys.argv:
         joytest()
     else:
