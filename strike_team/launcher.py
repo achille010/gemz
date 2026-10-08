@@ -41,6 +41,9 @@ DEFAULT_CFG = {
     "invert": {},                   # e.g. {"p1_ly": true}  - toggled on the controller check screen
 }
 
+ORIENT_STEPS = [("ly", "Push the LEFT stick FORWARD (away from you)"), ("lx", "Push the LEFT stick to the RIGHT"),
+                ("ry", "Push the RIGHT stick FORWARD (away from you)"), ("rx", "Push the RIGHT stick to the RIGHT")]
+
 BG = (12, 16, 20)
 FG = (230, 232, 235)
 DIM = (130, 138, 146)
@@ -294,6 +297,11 @@ class App:
         self.text("stick up/down + right click   |   arrows + Enter", (W // 2, 480), self.f, DIM, True)
         if not self.godot:
             self.text("Godot 4 not found - set godot_exe in config.json", (W // 2, 515), self.f, RED, True)
+        for i in range(2):
+            p = self.hub.pad(i)
+            if p is not None and not isinstance(p, SimPad) and f"p{i + 1}" not in self.cfg.get("map", {}):
+                self.text(f"P{i + 1} pad not oriented yet: open Controller Check and press {'O' if i == 0 else 'P'}",
+                          (W // 2, 545 + i * 28), self.f, ACC, True)
 
     def screen_brief(self, keys, up, down, ok, back):
         m = self.mission
@@ -366,7 +374,11 @@ class App:
 
     def screen_pads(self, keys, up, down, ok, back):
         if pygame.K_ESCAPE in keys or pygame.K_BACKSPACE in keys:
-            self.screen_name = "menu"
+            if getattr(self, "wiz", None):
+                self.wiz = None
+                self.msg = "orientation cancelled"
+            else:
+                self.screen_name = "menu"
             return
         inv = self.cfg.setdefault("invert", {})
         flips = {pygame.K_1: "p1_lx", pygame.K_2: "p1_ly", pygame.K_3: "p1_rx", pygame.K_4: "p1_ry",
@@ -384,6 +396,14 @@ class App:
             elif k in (pygame.K_F1, pygame.K_F2):
                 i = 0 if k == pygame.K_F1 else 1
                 self.hub.sim[i] = None if self.hub.sim[i] else SimPad()
+            elif k in (pygame.K_o, pygame.K_p):
+                i = 0 if k == pygame.K_o else 1
+                if self.hub.pad(i) is not None and not isinstance(self.hub.pad(i), SimPad):
+                    self.wiz = {"pad": i, "step": 0, "res": {}, "hold": 0.0, "release": False}
+                else:
+                    self.msg = f"P{i + 1}: connect the pad first, then press {'O' if i == 0 else 'P'}"
+        if getattr(self, "wiz", None):
+            self._orient_step()
         # simulated pads follow the keyboard: P1 WASD / arrows look, P2 IJKL / numpad
         kp = pygame.key.get_pressed()
         for i, (u, d, l, r, lu, ld, ll, lr, c1, c2) in enumerate([
@@ -422,8 +442,52 @@ class App:
                       (60, y), self.f_small, DIM)
         if self.hub.error:
             self.text(self.hub.error, (60, y + 22), self.f_small, RED)
-        self.text("1-4 / 5-8 flip P1 / P2 axes   S swap players   R recalibrate   F1/F2 simulated pad   Esc back",
+        self.text("O / P orient P1 / P2 sticks   1-4 / 5-8 flip axes   S swap players   R recalibrate   F1/F2 sim pad   Esc back",
                   (W // 2, H - 84), self.f_small, DIM, True)
+        if getattr(self, "wiz", None):
+            wz = self.wiz
+            pygame.draw.rect(self.screen, (10, 12, 14), (W // 2 - 380, 160, 760, 150), border_radius=10)
+            pygame.draw.rect(self.screen, ACC, (W // 2 - 380, 160, 760, 150), 2, border_radius=10)
+            self.text(f"ORIENT PLAYER {wz['pad'] + 1}  -  step {wz['step'] + 1} / 4", (W // 2, 175), self.f_mid, ACC, True)
+            txt = "Let go of the stick (back to centre)..." if wz["release"] else ORIENT_STEPS[wz["step"]][1]
+            self.text(txt, (W // 2, 225), self.f_mid, FG, True)
+            self.text("hold it at the edge for half a second   -   Esc cancels", (W // 2, 270), self.f_small, DIM, True)
+
+    def _orient_step(self):
+        """Orientation wizard: find which raw axis (and direction) each stick direction really is."""
+        wz = self.wiz
+        p = self.hub.pad(wz["pad"])
+        if p is None:
+            self.wiz = None
+            self.msg = "pad disconnected - orientation cancelled"
+            return
+        raw = [p.axis(a, 0.0) for a in range(4)]
+        if wz["release"]:
+            if max(abs(v) for v in raw) < 0.25:
+                wz["release"] = False
+            return
+        used = [r[0] for r in wz["res"].values()]
+        cand = [a for a in range(4) if a not in used]
+        best = max(cand, key=lambda a: abs(raw[a]))
+        if abs(raw[best]) > 0.6:
+            wz["hold"] += self.clock.get_time() / 1000.0
+            if wz["hold"] > 0.5:
+                name = ORIENT_STEPS[wz["step"]][0]
+                wz["res"][name] = [best, 1 if raw[best] > 0 else -1]
+                wz["step"] += 1
+                wz["hold"] = 0.0
+                wz["release"] = True
+                if wz["step"] == 4:
+                    key = f"p{wz['pad'] + 1}"
+                    self.cfg.setdefault("map", {})[key] = wz["res"]
+                    inv = self.cfg.setdefault("invert", {})
+                    for n in ("lx", "ly", "rx", "ry"):
+                        inv.pop(f"{key}_{n}", None)
+                    save_json(CFG_PATH, self.cfg)
+                    self.msg = f"Player {wz['pad'] + 1} sticks oriented and saved"
+                    self.wiz = None
+        else:
+            wz["hold"] = 0.0
 
     def wrap(self, t, width):
         out, line = [], ""

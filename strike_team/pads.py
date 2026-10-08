@@ -242,13 +242,39 @@ class PadHub:
         dz = self.cfg.get("deadzone", 0.12)
         inv = self.cfg.get("invert", {})
         key = f"p{i + 1}"
+        amap = self.cfg.get("map", {}).get(key)       # from the orientation wizard
         out = []
         for a, name in enumerate(["lx", "ly", "rx", "ry"]):
-            v = p.axis(a, dz)
-            if name in ("ly", "ry"):
-                v = -v                      # analog sticks read LOW when pushed up
+            if amap and name in amap and not isinstance(p, SimPad):
+                src, sign = amap[name]
+                v = p.axis(int(src), dz) * sign      # wizard already knows the real direction
+            else:
+                v = p.axis(a, dz)
+                if name in ("ly", "ry"):
+                    v = -v                  # analog sticks read LOW when pushed up
             if inv.get(f"{key}_{name}"):
                 v = -v
             out.append(round(v, 3))
-        out += [1 if p.button(0) else 0, 1 if p.button(1) else 0, 1]
+        out += [1 if self._click(i, 0, p, out[0], out[1]) else 0,
+                1 if self._click(i, 1, p, out[2], out[3]) else 0, 1]
         return out
+
+    def _click(self, i, b, p, sx, sy):
+        """Filtered stick click. KY-023 sticks also press their switch when pushed hard to the
+        edge, so a click only STARTS when its own stick is near the centre ("click_guard",
+        0..1, set 1.5 to disable); once on, it stays on until released, even while moving the
+        stick. Clicks must also be stable for 40 ms (debounce against bounce / BT noise)."""
+        if not hasattr(self, "_bs"):
+            self._bs = [[{"raw": False, "t": 0.0, "on": False} for _ in range(2)] for _ in range(2)]
+        st = self._bs[i][b]
+        raw = bool(p.button(b))
+        now = time.time()
+        if raw != st["raw"]:
+            st["raw"], st["t"] = raw, now
+        if now - st["t"] < 0.04:
+            return st["on"]
+        if not raw:
+            st["on"] = False
+        elif not st["on"] and (sx * sx + sy * sy) ** 0.5 < self.cfg.get("click_guard", 0.55):
+            st["on"] = True
+        return st["on"]
