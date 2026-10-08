@@ -2,7 +2,7 @@
   STRIKE TEAM - wireless pad  (Arduino UNO + 2 joysticks + HC-05 or HC-06 Bluetooth module)
   Build TWO of these, one per player. Upload the same sketch to both.
 
-  It sends one line per reading:   J,<leftX>,<leftY>,<rightX>,<rightY>,<leftClick>,<rightClick>
+  It sends one line per reading:   J,<leftX>,<leftY>,<rightX>,<rightY>,<leftClick>,<rightClick>,<checksum>
   to BOTH the Bluetooth module and the USB cable, so the pad also works plugged in with a cable.
 
   Controls in the game:
@@ -32,7 +32,17 @@ const int PIN_LX = A0, PIN_LY = A1, PIN_RX = A2, PIN_RY = A3;
 const int PIN_LSW = 2, PIN_RSW = 3;
 const int LED = 13;
 
-char line[48];
+char line[56];
+
+// The UNO has ONE ADC switched between pins: the first reading after a switch still carries
+// the previous stick's voltage (sticks "bleed" into each other). Throw it away, then average 4.
+int stick(int pin) {
+  analogRead(pin);
+  delayMicroseconds(50);
+  long t = 0;
+  for (int i = 0; i < 4; i++) t += analogRead(pin);
+  return t / 4;
+}
 
 void setup() {
   pinMode(PIN_LSW, INPUT_PULLUP);
@@ -45,8 +55,10 @@ void setup() {
 void loop() {
   int lc = digitalRead(PIN_LSW) == LOW ? 1 : 0;
   int rc = digitalRead(PIN_RSW) == LOW ? 1 : 0;
-  snprintf(line, sizeof(line), "J,%d,%d,%d,%d,%d,%d\r\n",
-           analogRead(PIN_LX), analogRead(PIN_LY), analogRead(PIN_RX), analogRead(PIN_RY), lc, rc);
+  int lx = stick(PIN_LX), ly = stick(PIN_LY), rx = stick(PIN_RX), ry = stick(PIN_RY);
+  // last number = checksum: the PC drops any line damaged on the radio link
+  int sum = (lx + ly + rx + ry + lc + rc) % 256;
+  snprintf(line, sizeof(line), "J,%d,%d,%d,%d,%d,%d,%d\r\n", lx, ly, rx, ry, lc, rc, sum);
   Serial.print(line);
   bt.print(line);                   // at 9600 baud this takes ~28 ms, which paces the loop
   digitalWrite(LED, rc);            // on-board LED lights while shooting - handy for testing
